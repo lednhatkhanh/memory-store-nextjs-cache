@@ -1,0 +1,12 @@
+node_modules/
+.turbo/
+dist/
+.next/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
+pnpm-debug.log*
+apps/web/next-env.d.ts

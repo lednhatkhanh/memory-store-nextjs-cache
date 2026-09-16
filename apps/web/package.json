@@ -1,0 +1,35 @@
+{
+  "name": "@memory-store/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "check-types": "next typegen && tsc --noEmit",
+    "dev": "next dev",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint --type-aware --report-unused-disable-directives app components lib test next.config.ts",
+    "start": "next start",
+    "test": "next build && vitest run"
+  },
+  "dependencies": {
+    "ky": "2.1.0",
+    "next": "16.3.5",
+    "react": "19.3.0",
+    "react-aria-components": "1.21.1",
+    "react-dom": "19.3.0",
+    "react-markdown": "10.1.0",
+    "unicorn-nextjs-memory-cache": "workspace:0.0.0"
+  },
+  "devDependencies": {
+    "@memory-store/content-service": "workspace:0.0.0",
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/node": "catalog:",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "tailwindcss": "4.3.3",
+    "testcontainers": "12.1.0",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

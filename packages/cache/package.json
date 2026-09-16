@@ -1,0 +1,48 @@
+{
+  "name": "unicorn-nextjs-memory-cache",
+  "version": "0.0.0",
+  "description": "A Redis-backed Next.js Cache Components handler.",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./next-handler": {
+      "types": "./dist/next-handler.d.ts",
+      "import": "./dist/next-handler.js",
+      "require": "./dist/next-handler.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rspack build --mode production && tsc --project tsconfig.build.json --emitDeclarationOnly",
+    "check-types": "tsc --noEmit",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint --type-aware --deny perf --deny restriction --report-unused-disable-directives resource src test rspack.config.ts",
+    "measure:resources": "pnpm build && node resource/run.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "date-fns": "4.4.0",
+    "es-toolkit": "1.52.0",
+    "ioredis": "6.0.0"
+  },
+  "devDependencies": {
+    "@rspack/cli": "2.2.5",
+    "@rspack/core": "2.2.5",
+    "@types/node": "catalog:",
+    "testcontainers": "12.1.0",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

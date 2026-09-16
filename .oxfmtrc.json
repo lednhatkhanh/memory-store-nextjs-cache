@@ -1,0 +1,16 @@
+{
+  "ignorePatterns": [
+    ".agents/**",
+    ".next/**",
+    ".scratch/**",
+    "dist/**",
+    "docs/agents/**",
+    "node_modules/**",
+    "plan.md",
+    "pnpm-lock.yaml",
+    "skills-lock.json"
+  ],
+  "sortTailwindcss": {
+    "stylesheet": "./apps/web/app/styles.css"
+  }
+}

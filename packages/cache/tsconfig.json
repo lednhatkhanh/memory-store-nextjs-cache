@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["resource/**/*.ts", "src/**/*.ts", "test/**/*.ts", "rspack.config.ts"]
+}

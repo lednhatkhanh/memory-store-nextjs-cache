@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@theme {
+  --color-accent: oklch(52% 0.13 157deg);
+  --color-accent-soft: oklch(95% 0.025 155deg);
+  --color-canvas: oklch(96% 0.018 92deg);
+  --color-ink: oklch(25% 0.025 150deg);
+  --color-muted: oklch(48% 0.025 150deg);
+  --color-outline: oklch(79% 0.035 150deg);
+  --color-panel: oklch(99% 0.008 92deg);
+  --font-sans: ui-sans-serif, system-ui, sans-serif;
+  --shadow-panel: 0 1.5rem 4rem oklch(25% 0.04 150deg / 12%);
+}
+
+@layer base {
+  body {
+    min-height: 100vh;
+    margin: 0;
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+  }
+
+  ::selection {
+    background: var(--color-accent-soft);
+  }
+}

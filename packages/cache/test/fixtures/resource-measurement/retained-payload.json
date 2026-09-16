@@ -1,0 +1,40 @@
+{
+  "observations": {
+    "activeResourceDeltaCount": 1,
+    "elapsedMilliseconds": 1400,
+    "maxArrayBuffersAndBuffersBytes": 16781312,
+    "maxCurrentRssBytes": 100663296,
+    "maxEventLoopDelayP99Milliseconds": 12,
+    "maxEventLoopUtilization": 0.42,
+    "maxExternalBytes": 16785408,
+    "maxHeapUsedBytes": 50331648,
+    "maxPendingWritesAfterPhase": 0,
+    "peakRssBytes": 117440512,
+    "maxBufferedBytesAfterPhase": 0,
+    "maxCapacityShortfallBytesAfterPhase": 0,
+    "retainedArrayBuffersAndBuffersGrowthBytes": 8388608,
+    "retainedExternalGrowthBytes": 8388608,
+    "retainedHeapGrowthBytes": 16777216,
+    "systemCpuMilliseconds": 120,
+    "userCpuMilliseconds": 480
+  },
+  "thresholds": {
+    "maxActiveResourceDeltaCount": 0,
+    "maxArrayBuffersAndBuffersBytes": 134217728,
+    "maxCurrentRssBytes": 536870912,
+    "maxElapsedMilliseconds": 60000,
+    "maxEventLoopDelayP99Milliseconds": 500,
+    "maxEventLoopUtilization": 1,
+    "maxExternalBytes": 268435456,
+    "maxHeapUsedBytes": 268435456,
+    "maxPendingWritesAfterPhase": 0,
+    "maxPeakRssBytes": 671088640,
+    "maxBufferedBytesAfterPhase": 0,
+    "maxCapacityShortfallBytesAfterPhase": 0,
+    "maxRetainedArrayBuffersAndBuffersGrowthBytes": 1048576,
+    "maxRetainedExternalGrowthBytes": 1048576,
+    "maxRetainedHeapGrowthBytes": 4194304,
+    "maxSystemCpuMilliseconds": 30000,
+    "maxUserCpuMilliseconds": 60000
+  }
+}

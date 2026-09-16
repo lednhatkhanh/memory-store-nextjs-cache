@@ -14,7 +14,7 @@ export type MeasurementChild = Readonly<{
 }>;
 
 export type ResourceCoordinatorOptions<Evidence> = Readonly<{
-  createChild: (connection: RedisConnection) => MeasurementChild;
+  createChild: (connection: RedisConnection) => MeasurementChild | Promise<MeasurementChild>;
   createRedisResource: () => Promise<DisposableRedisResource>;
   parseEvidence: (value: unknown) => Evidence;
   timeoutMilliseconds: number;
@@ -53,7 +53,7 @@ export async function coordinateResourceMeasurement<Evidence>(
 
   try {
     redis = await options.createRedisResource();
-    child = options.createChild(redis.connection);
+    child = await options.createChild(redis.connection);
     const timeout = timeoutAfter(options.timeoutMilliseconds);
     try {
       const message = await Promise.race([child.message, timeout.promise]);

@@ -37,8 +37,9 @@ corepack pnpm install --frozen-lockfile
 - `pnpm lint` runs Oxlint.
 - `pnpm format:check` verifies Oxfmt formatting.
 - `pnpm measure:cache-resources` rebuilds the production cache package without a Turborepo cache
-  lookup, runs its fixed workload in an isolated child and disposable Redis container, and prints
-  structured resource evidence. See `packages/cache/README.md` for the workload and metrics.
+  lookup, runs retention and peak-concurrency workloads in an isolated child and separately
+  quota-limited Redis container, and prints structured resource and enforcement evidence. See
+  `packages/cache/README.md` for the limits, Linux cgroup behavior, and failure-only diagnostics.
 - `pnpm verify` runs the complete local quality gate.
 - `pnpm --filter @memory-store/web dev` starts the Next.js reference application.
 - `pnpm --filter @memory-store/content-service dev` starts the Fastify support service.

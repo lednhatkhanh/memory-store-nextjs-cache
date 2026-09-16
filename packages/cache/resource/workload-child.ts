@@ -1,7 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { arch, platform, release, type as operatingSystemType } from "node:os";
+import path from "node:path";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
-import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+import { setImmediate as yieldToEventLoop, setTimeout as delay } from "node:timers/promises";
+import { writeHeapSnapshot } from "node:v8";
 
 import { Redis } from "ioredis";
 
@@ -9,6 +12,9 @@ import {
   RESOURCE_EVIDENCE_SCHEMA_VERSION,
   type EventLoopDelayEvidence,
   type ResourceActivityEvidence,
+  type ResourceConcurrencyEvidence,
+  type ResourceLimitExerciseEvidence,
+  type ResourceLimitOutcomeEvidence,
   type ResourceLifecyclePhaseName,
   type ResourceMeasurementPhaseName,
   type ResourcePhaseEvidence,
@@ -31,6 +37,12 @@ type MeasurementCacheEntry = Readonly<{
   value: ReadableStream<Uint8Array>;
 }>;
 type MeasurementResourceState = Readonly<{ bufferedBytes: number; pendingWrites: number }>;
+type MeasurementDiagnostic = Readonly<{
+  event: "entry-rejected";
+  limitBytes: number;
+  observedBytes: number;
+  reason: "buffer-limit" | "entry-size-limit";
+}>;
 type MeasurementRedisCacheHandler = Readonly<{
   get: (cacheKey: string, softTags: string[]) => Promise<MeasurementCacheEntry | undefined>;
   getResourceState: () => MeasurementResourceState;
@@ -44,6 +56,7 @@ type ProductionPackage = Readonly<{
       maxBufferedBytes: number;
       maxEntrySizeBytes: number;
       namespace: string;
+      onDiagnostic?: (diagnostic: MeasurementDiagnostic) => void;
     }>,
   ) => MeasurementRedisCacheHandler;
   packageIdentity: string;
@@ -52,6 +65,10 @@ type HeldPayload = Readonly<{
   buffered: Promise<true>;
   release: () => void;
   stream: ReadableStream<Uint8Array>;
+}>;
+type PhaseRunEvidence = Readonly<{
+  concurrency: ResourceConcurrencyEvidence | null;
+  releaseCheck: ResourceReleaseCheckEvidence;
 }>;
 
 function isProductionPackage(value: unknown): value is ProductionPackage {
@@ -176,6 +193,51 @@ async function stabilizeGarbageCollection(passes: number): Promise<void> {
   }
 }
 
+function captureMemory(): ResourceSampleEvidence["memory"] {
+  const memory = process.memoryUsage();
+  return {
+    arrayBuffersAndBuffersBytes: memory.arrayBuffers,
+    currentRssBytes: memory.rss,
+    externalBytes: memory.external,
+    peakRssBytes: process.resourceUsage().maxRSS * 1_024,
+    v8HeapTotalBytes: memory.heapTotal,
+    v8HeapUsedBytes: memory.heapUsed,
+  };
+}
+
+function maximumMemory(
+  left: ResourceSampleEvidence["memory"],
+  right: ResourceSampleEvidence["memory"],
+): ResourceSampleEvidence["memory"] {
+  return {
+    arrayBuffersAndBuffersBytes: Math.max(
+      left.arrayBuffersAndBuffersBytes,
+      right.arrayBuffersAndBuffersBytes,
+    ),
+    currentRssBytes: Math.max(left.currentRssBytes, right.currentRssBytes),
+    externalBytes: Math.max(left.externalBytes, right.externalBytes),
+    peakRssBytes: Math.max(left.peakRssBytes, right.peakRssBytes),
+    v8HeapTotalBytes: Math.max(left.v8HeapTotalBytes, right.v8HeapTotalBytes),
+    v8HeapUsedBytes: Math.max(left.v8HeapUsedBytes, right.v8HeapUsedBytes),
+  };
+}
+
+function trackPeakMemory(): Readonly<{
+  stop: () => ResourceSampleEvidence["memory"];
+}> {
+  let peak = captureMemory();
+  const timer = setInterval(() => {
+    peak = maximumMemory(peak, captureMemory());
+  }, 1);
+  return {
+    stop() {
+      clearInterval(timer);
+      peak = maximumMemory(peak, captureMemory());
+      return peak;
+    },
+  };
+}
+
 async function captureSamples(
   workload: ResourceWorkloadParameters,
 ): Promise<ResourceSampleEvidence[]> {
@@ -183,17 +245,9 @@ async function captureSamples(
   for (let index = 0; index < workload.samplesPerPhase; index += 1) {
     // oxlint-disable-next-line no-await-in-loop -- Comparable samples use identical GC stabilization.
     await stabilizeGarbageCollection(workload.garbageCollectionPassesPerSample);
-    const memory = process.memoryUsage();
     samples.push({
       activeResourceTypes: activeResourceTypes(),
-      memory: {
-        arrayBuffersAndBuffersBytes: memory.arrayBuffers,
-        currentRssBytes: memory.rss,
-        externalBytes: memory.external,
-        peakRssBytes: process.resourceUsage().maxRSS * 1_024,
-        v8HeapTotalBytes: memory.heapTotal,
-        v8HeapUsedBytes: memory.heapUsed,
-      },
+      memory: captureMemory(),
     });
   }
   return samples;
@@ -231,7 +285,7 @@ function eventLoopDelay(
 async function measureWorkloadPhase(
   name: ResourceMeasurementPhaseName,
   workload: ResourceWorkloadParameters,
-  run: () => Promise<ResourceReleaseCheckEvidence>,
+  run: () => Promise<PhaseRunEvidence>,
 ): Promise<ResourcePhaseEvidence> {
   await stabilizeGarbageCollection(workload.garbageCollectionPassesPerSample);
   const histogram = monitorEventLoopDelay({ resolution: 1 });
@@ -241,11 +295,13 @@ async function measureWorkloadPhase(
   const startedAt = performance.now();
   const startedCpu = process.cpuUsage();
   const startedEventLoop = performance.eventLoopUtilization();
+  const memoryTracker = trackPeakMemory();
   let activity: ResourceActivityEvidence | undefined;
-  let releaseCheck: ResourceReleaseCheckEvidence | undefined;
+  let peakMemory: ResourceSampleEvidence["memory"] | undefined;
+  let phaseRun: PhaseRunEvidence | undefined;
 
   try {
-    releaseCheck = await run();
+    phaseRun = await run();
     const cpu = process.cpuUsage(startedCpu);
     const eventLoop = performance.eventLoopUtilization(startedEventLoop);
     activity = {
@@ -256,15 +312,23 @@ async function measureWorkloadPhase(
         idleMilliseconds: eventLoop.idle,
         utilization: eventLoop.utilization,
       },
+      peakMemory: (peakMemory = memoryTracker.stop()),
       systemCpuMilliseconds: cpu.system / 1_000,
       userCpuMilliseconds: cpu.user / 1_000,
     };
   } finally {
     histogram.disable();
+    if (!peakMemory) memoryTracker.stop();
   }
-  if (!activity || !releaseCheck) throw new Error(`Resource phase ${name} did not record evidence`);
+  if (!activity || !phaseRun) throw new Error(`Resource phase ${name} did not record evidence`);
   const samples = await captureSamples(workload);
-  return { activity, name, releaseCheck, samples };
+  return {
+    activity,
+    concurrency: phaseRun.concurrency,
+    name,
+    releaseCheck: phaseRun.releaseCheck,
+    samples,
+  };
 }
 
 async function captureLifecyclePhase(
@@ -274,7 +338,7 @@ async function captureLifecyclePhase(
 ): Promise<ResourcePhaseEvidence> {
   await transition();
   const samples = await captureSamples(workload);
-  return { activity: null, name, releaseCheck: null, samples };
+  return { activity: null, concurrency: null, name, releaseCheck: null, samples };
 }
 
 function createEntry(
@@ -298,13 +362,67 @@ function standardEntry(
   );
 }
 
-function timestampGenerator(): () => number {
-  let previous = 0;
-  return () => {
-    const current = performance.timeOrigin + performance.now();
-    previous = Math.max(current, previous + 0.001);
-    return previous;
+function streamedPayloadBytes(
+  random: SeededRandom,
+  totalBytes: number,
+  chunkBytes: number,
+): ReadableStream<Uint8Array> {
+  const byte = Math.floor(random() * 256);
+  let emittedBytes = 0;
+  return new ReadableStream({
+    async pull(controller) {
+      await yieldToEventLoop();
+      if (emittedBytes === totalBytes) {
+        controller.close();
+        return;
+      }
+      const length = Math.min(chunkBytes, totalBytes - emittedBytes);
+      const chunk = new Uint8Array(length);
+      chunk.fill(byte);
+      emittedBytes += length;
+      controller.enqueue(chunk);
+    },
+  });
+}
+
+function entryMetadataBytes(tags: string[], timestamp: number): number {
+  return Buffer.byteLength(
+    JSON.stringify({ expire: 3_600, revalidate: 300, stale: 60, tags, timestamp }),
+  );
+}
+
+function limitOutcome(
+  attemptedBytes: number,
+  boundary: ResourceLimitOutcomeEvidence["boundary"],
+  reason: ResourceLimitOutcomeEvidence["reason"],
+): ResourceLimitOutcomeEvidence {
+  return {
+    attemptedBytes,
+    boundary,
+    outcome: boundary === "above" ? "rejected" : "accepted",
+    reason,
   };
+}
+
+async function readEntryFingerprint(
+  handler: MeasurementRedisCacheHandler,
+  cacheKey: string,
+): Promise<string> {
+  const entry = await handler.get(cacheKey, []);
+  if (!entry) throw new Error(`Expected a completed entry for ${cacheKey}`);
+  const payload = await new Response(entry.value).arrayBuffer();
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        expire: entry.expire,
+        revalidate: entry.revalidate,
+        stale: entry.stale,
+        tags: entry.tags,
+        timestamp: entry.timestamp,
+      }),
+    )
+    .update(new Uint8Array(payload))
+    .digest("hex");
 }
 
 async function expectRejection(promise: Promise<void>, expectedMessage: string): Promise<void> {
@@ -315,6 +433,110 @@ async function expectRejection(promise: Promise<void>, expectedMessage: string):
     throw error;
   }
   throw new Error(`Expected workload rejection: ${expectedMessage}`);
+}
+
+async function runPerEntryBoundaries(
+  handler: MeasurementRedisCacheHandler,
+  random: SeededRandom,
+  workload: ResourceWorkloadParameters,
+  nextTimestamp: () => number,
+): Promise<
+  Readonly<{ outcomes: ResourceLimitOutcomeEvidence[]; previousValuePreserved: boolean }>
+> {
+  const cacheKey = "resource-per-entry-boundary";
+  const chunkBytes = Math.min(workload.peakMaxEntrySizeBytes, 1_024 * 1_024);
+  const outcomes: ResourceLimitOutcomeEvidence[] = [];
+
+  for (const [boundary, difference] of [
+    ["below", -1],
+    ["at", 0],
+  ] as const) {
+    const timestamp = nextTimestamp();
+    const payloadBytes =
+      workload.peakMaxEntrySizeBytes - entryMetadataBytes([], timestamp) + difference;
+    if (payloadBytes <= 0) throw new Error("Peak per-entry limit cannot contain cache metadata");
+    // oxlint-disable-next-line no-await-in-loop -- Boundary cases settle independently.
+    await handler.set(
+      cacheKey,
+      Promise.resolve(
+        createEntry(streamedPayloadBytes(random, payloadBytes, chunkBytes), [], timestamp),
+      ),
+    );
+    outcomes.push(limitOutcome(workload.peakMaxEntrySizeBytes + difference, boundary, null));
+  }
+
+  const preservedFingerprint = await readEntryFingerprint(handler, cacheKey);
+  const rejectedTimestamp = nextTimestamp();
+  const rejectedPayloadBytes =
+    workload.peakMaxEntrySizeBytes - entryMetadataBytes([], rejectedTimestamp) + 1;
+  await expectRejection(
+    handler.set(
+      cacheKey,
+      Promise.resolve(
+        createEntry(
+          streamedPayloadBytes(random, rejectedPayloadBytes, chunkBytes),
+          [],
+          rejectedTimestamp,
+        ),
+      ),
+    ),
+    "Redis cache entry rejected: entry-size-limit",
+  );
+  outcomes.push(limitOutcome(workload.peakMaxEntrySizeBytes + 1, "above", "entry-size-limit"));
+  return {
+    outcomes,
+    previousValuePreserved:
+      (await readEntryFingerprint(handler, cacheKey)) === preservedFingerprint,
+  };
+}
+
+function distributedByteCounts(totalBytes: number, streamCount: number): number[] {
+  const quotient = Math.floor(totalBytes / streamCount);
+  const remainder = totalBytes % streamCount;
+  return Array.from({ length: streamCount }, (_, index) => quotient + (index < remainder ? 1 : 0));
+}
+
+async function holdConcurrentPayloads(
+  handler: MeasurementRedisCacheHandler,
+  random: SeededRandom,
+  nextTimestamp: () => number,
+  prefix: string,
+  byteCounts: number[],
+): Promise<
+  Readonly<{
+    payloads: HeldPayload[];
+    writes: Array<Promise<void>>;
+  }>
+> {
+  const payloads = byteCounts.map((byteCount) =>
+    heldPayload(byteCount, Math.floor(random() * 256)),
+  );
+  const writes = payloads.map(
+    async (payload, index) =>
+      await handler.set(
+        `${prefix}-${index}`,
+        Promise.resolve(createEntry(payload.stream, [], nextTimestamp())),
+      ),
+  );
+  await Promise.all(payloads.map(async (payload) => payload.buffered));
+  return { payloads, writes };
+}
+
+async function releaseConcurrentPayloads(
+  payloads: HeldPayload[],
+  writes: Array<Promise<void>>,
+): Promise<void> {
+  for (const payload of payloads) payload.release();
+  await Promise.all(writes);
+}
+
+function timestampGenerator(): () => number {
+  let previous = 0;
+  return () => {
+    const current = performance.timeOrigin + performance.now();
+    previous = Math.max(current, previous + 0.001);
+    return previous;
+  };
 }
 
 async function runSteadyStateBatch(
@@ -484,7 +706,7 @@ async function runPhaseAndProbe(
   nextTimestamp: () => number,
   phaseName: ResourceMeasurementPhaseName,
   run: () => Promise<void>,
-): Promise<ResourceReleaseCheckEvidence> {
+): Promise<PhaseRunEvidence> {
   await run();
   const afterPhase = handler.getResourceState();
   const acceptedBufferedBytes = await probeFullBufferedCapacity(
@@ -496,9 +718,137 @@ async function runPhaseAndProbe(
   );
   const afterProbe = handler.getResourceState();
   return {
-    acceptedBufferedBytes,
-    bufferedBytesAfter: Math.max(afterPhase.bufferedBytes, afterProbe.bufferedBytes),
-    pendingWritesAfter: Math.max(afterPhase.pendingWrites, afterProbe.pendingWrites),
+    concurrency: null,
+    releaseCheck: {
+      acceptedBufferedBytes,
+      bufferedBytesAfter: Math.max(afterPhase.bufferedBytes, afterProbe.bufferedBytes),
+      pendingWritesAfter: Math.max(afterPhase.pendingWrites, afterProbe.pendingWrites),
+    },
+  };
+}
+
+async function runBufferLimitBoundaries(
+  handler: MeasurementRedisCacheHandler,
+  random: SeededRandom,
+  workload: ResourceWorkloadParameters,
+  nextTimestamp: () => number,
+  diagnostics: MeasurementDiagnostic[],
+): Promise<Readonly<{ limitExercise: ResourceLimitExerciseEvidence; phase: PhaseRunEvidence }>> {
+  const perEntry = await runPerEntryBoundaries(handler, random, workload, nextTimestamp);
+  const aggregateOutcomes: ResourceLimitOutcomeEvidence[] = [];
+  const below = await holdConcurrentPayloads(
+    handler,
+    random,
+    nextTimestamp,
+    "resource-aggregate-slot",
+    distributedByteCounts(workload.peakMaxBufferedBytes - 1, workload.peakConcurrentStreams),
+  );
+  const belowState = handler.getResourceState();
+  if (belowState.bufferedBytes !== workload.peakMaxBufferedBytes - 1) {
+    throw new Error("Below-limit aggregate workload did not reserve the expected bytes");
+  }
+  aggregateOutcomes.push(limitOutcome(workload.peakMaxBufferedBytes - 1, "below", null));
+  await releaseConcurrentPayloads(below.payloads, below.writes);
+
+  const protectedKey = "resource-aggregate-overflow";
+  await handler.set(
+    protectedKey,
+    Promise.resolve(createEntry(streamedPayloadBytes(random, 1, 1), [], nextTimestamp())),
+  );
+  const previousFingerprint = await readEntryFingerprint(handler, protectedKey);
+  const at = await holdConcurrentPayloads(
+    handler,
+    random,
+    nextTimestamp,
+    "resource-aggregate-slot",
+    distributedByteCounts(workload.peakMaxBufferedBytes, workload.peakConcurrentStreams),
+  );
+  const atState = handler.getResourceState();
+  if (
+    atState.bufferedBytes !== workload.peakMaxBufferedBytes ||
+    atState.pendingWrites !== workload.peakConcurrentStreams
+  ) {
+    throw new Error("At-limit aggregate workload did not reach the configured concurrency peak");
+  }
+  aggregateOutcomes.push(limitOutcome(workload.peakMaxBufferedBytes, "at", null));
+  await delay(5);
+  await expectRejection(
+    handler.set(
+      protectedKey,
+      Promise.resolve(createEntry(streamedPayloadBytes(random, 1, 1), [], nextTimestamp())),
+    ),
+    "Redis cache entry rejected: buffer-limit",
+  );
+  aggregateOutcomes.push(limitOutcome(workload.peakMaxBufferedBytes + 1, "above", "buffer-limit"));
+  const previousValuePreserved =
+    perEntry.previousValuePreserved &&
+    (await readEntryFingerprint(handler, protectedKey)) === previousFingerprint;
+  await releaseConcurrentPayloads(at.payloads, at.writes);
+  const after = handler.getResourceState();
+  const entryDiagnostic = diagnostics.find(
+    (diagnostic) => diagnostic.reason === "entry-size-limit",
+  );
+  const bufferDiagnostic = diagnostics.find((diagnostic) => diagnostic.reason === "buffer-limit");
+  if (!entryDiagnostic || !bufferDiagnostic) {
+    throw new Error("Boundary workload did not emit both bounded rejection diagnostics");
+  }
+
+  return {
+    limitExercise: {
+      aggregate: aggregateOutcomes,
+      diagnostics: [entryDiagnostic, bufferDiagnostic],
+      perEntry: perEntry.outcomes,
+      previousValuesPreserved: previousValuePreserved,
+      reservationsReleased: after.bufferedBytes === 0 && after.pendingWrites === 0,
+    },
+    phase: {
+      concurrency: null,
+      releaseCheck: {
+        acceptedBufferedBytes: atState.bufferedBytes,
+        bufferedBytesAfter: after.bufferedBytes,
+        pendingWritesAfter: after.pendingWrites,
+      },
+    },
+  };
+}
+
+async function runPeakConcurrency(
+  handler: MeasurementRedisCacheHandler,
+  random: SeededRandom,
+  workload: ResourceWorkloadParameters,
+  nextTimestamp: () => number,
+  run: number,
+  captureAtPeak?: () => Promise<void>,
+): Promise<PhaseRunEvidence> {
+  const held = await holdConcurrentPayloads(
+    handler,
+    random,
+    nextTimestamp,
+    "resource-aggregate-slot",
+    distributedByteCounts(workload.peakMaxBufferedBytes, workload.peakConcurrentStreams),
+  );
+  const atPeak = handler.getResourceState();
+  if (
+    atPeak.bufferedBytes !== workload.peakMaxBufferedBytes ||
+    atPeak.pendingWrites !== workload.peakConcurrentStreams
+  ) {
+    throw new Error(`Peak concurrency run ${run} did not reach the configured limits`);
+  }
+  await delay(5);
+  if (captureAtPeak) await captureAtPeak();
+  await releaseConcurrentPayloads(held.payloads, held.writes);
+  const after = handler.getResourceState();
+  return {
+    concurrency: {
+      bufferedBytesAtPeak: atPeak.bufferedBytes,
+      pendingWritesAtPeak: atPeak.pendingWrites,
+      run,
+    },
+    releaseCheck: {
+      acceptedBufferedBytes: atPeak.bufferedBytes,
+      bufferedBytesAfter: after.bufferedBytes,
+      pendingWritesAfter: after.pendingWrites,
+    },
   };
 }
 
@@ -526,6 +876,16 @@ function retainedGrowth(
   return Math.max(0, median(last.samples.map(select)) - median(first.samples.map(select)));
 }
 
+function peakConcurrencyPostGcRssRange(phases: ResourcePhaseEvidence[]): number {
+  const stabilizedRss = phases
+    .filter((phase) => phase.name.startsWith("peak-concurrency-run-"))
+    .map((phase) => median(phase.samples.map((sample) => sample.memory.currentRssBytes)));
+  if (stabilizedRss.length === 0) {
+    throw new Error("Resource measurement did not record peak-concurrency samples");
+  }
+  return Math.max(...stabilizedRss) - Math.min(...stabilizedRss);
+}
+
 function summarizeObservations(
   phases: ResourcePhaseEvidence[],
   resourceDelta: Readonly<Record<string, number>>,
@@ -533,6 +893,10 @@ function summarizeObservations(
 ): ResourceObservations {
   const samples = phases.flatMap((phase) => phase.samples);
   const activities = phases.flatMap((phase) => (phase.activity ? [phase.activity] : []));
+  const peakMemory = [
+    ...samples.map((sample) => sample.memory),
+    ...activities.map((activity) => activity.peakMemory),
+  ];
   const releaseChecks = phases.flatMap((phase) => (phase.releaseCheck ? [phase.releaseCheck] : []));
   if (activities.length === 0 || releaseChecks.length === 0) {
     throw new Error("Resource measurement did not record measured activity");
@@ -547,7 +911,7 @@ function summarizeObservations(
       0,
     ),
     maxArrayBuffersAndBuffersBytes: Math.max(
-      ...samples.map((sample) => sample.memory.arrayBuffersAndBuffersBytes),
+      ...peakMemory.map((memory) => memory.arrayBuffersAndBuffersBytes),
     ),
     maxBufferedBytesAfterPhase: Math.max(
       ...releaseChecks.map((releaseCheck) => releaseCheck.bufferedBytesAfter),
@@ -557,19 +921,20 @@ function summarizeObservations(
         Math.max(0, workload.maxBufferedBytes - releaseCheck.acceptedBufferedBytes),
       ),
     ),
-    maxCurrentRssBytes: Math.max(...samples.map((sample) => sample.memory.currentRssBytes)),
+    maxCurrentRssBytes: Math.max(...peakMemory.map((memory) => memory.currentRssBytes)),
     maxEventLoopDelayP99Milliseconds: Math.max(
       ...activities.map((activity) => activity.eventLoop.delay.p99Milliseconds),
     ),
     maxEventLoopUtilization: Math.max(
       ...activities.map((activity) => activity.eventLoop.utilization),
     ),
-    maxExternalBytes: Math.max(...samples.map((sample) => sample.memory.externalBytes)),
-    maxHeapUsedBytes: Math.max(...samples.map((sample) => sample.memory.v8HeapUsedBytes)),
+    maxExternalBytes: Math.max(...peakMemory.map((memory) => memory.externalBytes)),
+    maxHeapUsedBytes: Math.max(...peakMemory.map((memory) => memory.v8HeapUsedBytes)),
     maxPendingWritesAfterPhase: Math.max(
       ...releaseChecks.map((releaseCheck) => releaseCheck.pendingWritesAfter),
     ),
-    peakRssBytes: Math.max(...samples.map((sample) => sample.memory.peakRssBytes)),
+    peakConcurrencyPostGcRssRangeBytes: peakConcurrencyPostGcRssRange(phases),
+    peakRssBytes: Math.max(...peakMemory.map((memory) => memory.peakRssBytes)),
     retainedArrayBuffersAndBuffersGrowthBytes: retainedGrowth(
       phases,
       (sample) => sample.memory.arrayBuffersAndBuffersBytes,
@@ -609,6 +974,28 @@ function redisVersion(serverInformation: string): string {
   return version;
 }
 
+async function captureFailureArtifacts(directory: string): Promise<string[]> {
+  const diagnosticReportName = "cache-resource-failure-report.json";
+  const diagnosticReport = path.join(directory, diagnosticReportName);
+  const heapSnapshotName = "cache-resource-failure.heapsnapshot";
+  const heapSnapshot = path.join(directory, heapSnapshotName);
+  process.report.writeReport(diagnosticReportName);
+  const artifacts = [diagnosticReport, writeHeapSnapshot(heapSnapshot)];
+  const directoryEntries = (await readdir(directory)).toSorted();
+  const expectedEntries = [diagnosticReportName, heapSnapshotName].toSorted();
+  if (
+    directoryEntries.length !== expectedEntries.length ||
+    directoryEntries.some((entry, index) => entry !== expectedEntries[index])
+  ) {
+    throw new Error("Failure diagnostic retention exceeded its configured bounds");
+  }
+  const artifactStats = await Promise.all(artifacts.map(async (artifact) => stat(artifact)));
+  if (artifactStats.some((artifactStat) => !artifactStat.isFile() || artifactStat.size === 0)) {
+    throw new Error("Failure diagnostics did not produce both bounded artifacts");
+  }
+  return artifacts;
+}
+
 async function runMeasurement(request: ResourceChildRequest): Promise<ResourceRunEvidence> {
   const packageBuildUrl = new URL("../dist/index.js", import.meta.url);
   const productionPackage: unknown = await import(packageBuildUrl.href);
@@ -626,10 +1013,21 @@ async function runMeasurement(request: ResourceChildRequest): Promise<ResourceRu
   const phases: ResourcePhaseEvidence[] = [];
   const random = seededRandom(request.workload.seed);
   const nextTimestamp = timestampGenerator();
+  const diagnostics: MeasurementDiagnostic[] = [];
+  let failureArtifacts: string[] = [];
+  let limitExercise: ResourceLimitExerciseEvidence | undefined;
   const handler = productionPackage.createRedisCacheHandler(redis, {
     maxBufferedBytes: request.workload.maxBufferedBytes,
     maxEntrySizeBytes: request.workload.maxEntrySizeBytes,
     namespace: `resource-measurement:${request.workload.seed}`,
+  });
+  const peakHandler = productionPackage.createRedisCacheHandler(redis, {
+    maxBufferedBytes: request.workload.peakMaxBufferedBytes,
+    maxEntrySizeBytes: request.workload.peakMaxEntrySizeBytes,
+    namespace: `resource-peak-measurement:${request.workload.seed}`,
+    onDiagnostic(diagnostic) {
+      diagnostics.push(diagnostic);
+    },
   });
 
   try {
@@ -656,6 +1054,43 @@ async function runMeasurement(request: ResourceChildRequest): Promise<ResourceRu
       const phase = await measureWorkloadPhase(name, request.workload, async () =>
         runPhaseAndProbe(handler, random, request.workload, nextTimestamp, name, async () =>
           runSteadyStateBatch(handler, random, request.workload, nextTimestamp, name),
+        ),
+      );
+      phases.push(phase);
+    }
+
+    phases.push(
+      await measureWorkloadPhase("buffer-limit-boundaries", request.workload, async () => {
+        const result = await runBufferLimitBoundaries(
+          peakHandler,
+          random,
+          request.workload,
+          nextTimestamp,
+          diagnostics,
+        );
+        limitExercise = result.limitExercise;
+        return result.phase;
+      }),
+    );
+
+    const failureDiagnosticsDirectory = request.failureDiagnosticsDirectory;
+    for (let run = 1; run <= request.workload.peakRuns; run += 1) {
+      const name = `peak-concurrency-run-${run}` as const;
+      let captureAtPeak: (() => Promise<void>) | undefined;
+      if (run === 1 && failureDiagnosticsDirectory) {
+        captureAtPeak = async (): Promise<void> => {
+          failureArtifacts = await captureFailureArtifacts(failureDiagnosticsDirectory);
+        };
+      }
+      // oxlint-disable-next-line no-await-in-loop -- Each peak run must settle before comparison.
+      const phase = await measureWorkloadPhase(name, request.workload, async () =>
+        runPeakConcurrency(
+          peakHandler,
+          random,
+          request.workload,
+          nextTimestamp,
+          run,
+          captureAtPeak,
         ),
       );
       phases.push(phase);
@@ -708,7 +1143,8 @@ async function runMeasurement(request: ResourceChildRequest): Promise<ResourceRu
       activeResourceTypesAfterCleanup,
     );
     const observations = summarizeObservations(phases, resourceDelta, request.workload);
-
+    if (!limitExercise) throw new Error("Resource measurement did not record limit exercises");
+    const thresholdEvaluation = evaluateResourceThresholds(observations, request.thresholds);
     return {
       cleanup: {
         activeResourceDelta: resourceDelta,
@@ -727,11 +1163,15 @@ async function runMeasurement(request: ResourceChildRequest): Promise<ResourceRu
         package: metadata,
         redis: { image: request.redisImage, version: redisVersion(serverInformation) },
       },
+      executionLimits: request.executionLimits,
+      failureArtifacts,
+      failureRerunCommand: `pnpm --filter ${metadata.name} measure:resources --seed ${request.workload.seed} --failure-diagnostics`,
+      limitExercise,
       observations,
       phases,
       reproductionCommand: `pnpm --filter ${metadata.name} measure:resources --seed ${request.workload.seed}`,
       schemaVersion: RESOURCE_EVIDENCE_SCHEMA_VERSION,
-      thresholdEvaluation: evaluateResourceThresholds(observations, request.thresholds),
+      thresholdEvaluation,
       thresholds: request.thresholds,
       workload: request.workload,
     };

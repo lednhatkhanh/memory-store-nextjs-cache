@@ -14,11 +14,11 @@ pnpm --filter unicorn-nextjs-memory-cache measure:resources --seed 2214606
 
 The command directly rebuilds the production Rspack bundle before every run, so a requested
 measurement cannot be satisfied by a Turborepo cache hit. It then starts a disposable Redis
-container and a separate Node.js child with test-only garbage collection enabled. The coordinator
-enforces a 60-second child timeout. A successful run waits for the child to close its Redis client,
-disconnect IPC, and exit naturally before the container is removed. Crash, timeout, and malformed
-IPC paths still terminate the child before stopping the container. This command is intentionally
-separate from the normal `pnpm test` loop.
+container with a separate 128 MiB memory quota and a Node.js child with test-only garbage collection
+enabled. The coordinator enforces a 60-second child timeout. A successful run waits for the child to
+close its Redis client, disconnect IPC, and exit naturally before the container is removed. Crash,
+timeout, and malformed IPC paths still terminate the child before stopping the container. This
+command is intentionally separate from the normal `pnpm test` loop.
 
 ## Retention workload envelope
 
@@ -62,7 +62,44 @@ after Redis close, and permits no positive delta. The controlled `retained-paylo
 all three growth budgets and leaves one active resource, proving that the evaluator rejects retained
 state instead of merely collecting measurements.
 
-Absolute heap, RSS, CPU, and event-loop ceilings remain broad bootstrap protections; focused peak-RAM
-and performance contracts belong to their dedicated resource tickets. Passing this gate is evidence
-that the documented bounded workload releases cache-owned memory and resources. It is not a guarantee
-for every input, concurrency level, allocator, host, or future workload.
+## Peak-memory workload envelope
+
+The same production-bundle run separately exercises the documented production defaults: 8 MiB of
+metadata plus raw payload per entry and 32 MiB of raw payload across concurrent writes. It records
+accepted cases one byte below and exactly at both limits, then rejects one byte above each limit
+through the content-free `entry-rejected` diagnostic. The rejected writes preserve the last complete
+value and leave zero buffered bytes and pending writes.
+
+The aggregate boundary uses eight deterministic streams. Three additional runs hold eight 4 MiB
+streams concurrently at the exact 32 MiB aggregate limit before allowing publication. Each measured
+phase samples memory every millisecond while work is active, preserves the phase peak, and also keeps
+three stabilized post-phase samples. The repeated phases make the transient publication peak and the
+post-GC RSS plateau visible separately, so allocator fragmentation is not mistaken for retained V8,
+external, or ArrayBuffer growth. Their stabilized post-GC RSS medians must remain within a 96 MiB
+run-to-run range in addition to the absolute memory ceilings.
+
+The portable gate starts Node.js with a 256 MiB V8 old-space ceiling and permits at most 192 MiB each
+for used V8 heap, external memory, and ArrayBuffer/Buffer memory, plus 640 MiB current and peak RSS.
+On Linux with delegated cgroup v2 memory and CPU controllers, the coordinator also moves the child
+into a dedicated cgroup with a 768 MiB total-memory limit, zero swap, and a 0.5-core CPU quota. The
+Redis container keeps its independent 128 MiB memory and 0.5-core quotas. On other hosts, or Linux
+hosts without delegated controllers, the V8 and metric gates still run and `kernelLimits.status` is
+`skipped` with a bounded reason; that result is not kernel-enforced total-RAM or CPU-quota evidence.
+
+The normal command never writes heap diagnostics. After a failed run, reproduce its seed in the
+isolated diagnostic mode:
+
+```sh
+pnpm --filter unicorn-nextjs-memory-cache measure:resources --seed 2214606 --failure-diagnostics
+```
+
+That rerun uses only synthetic keys and payloads, clears its seed-scoped
+`packages/cache/.resource-diagnostics/` directory, and writes exactly one diagnostic report and one
+heap snapshot while the first eight-stream, 32 MiB peak is still held. Both paths are included in
+the evidence and validated as non-empty; a later rerun of the same seed replaces them instead of
+accumulating artifacts. The directory is ignored by Git.
+
+Passing this gate is evidence that the documented bounded workload stays inside these explicit
+limits and releases cache-owned memory and resources. It is not a guarantee for every input,
+concurrency level, allocator, host, or future workload. CPU and event-loop budgets remain broad until
+their dedicated performance ticket sharpens them.

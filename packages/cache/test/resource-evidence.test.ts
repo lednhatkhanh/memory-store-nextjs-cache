@@ -36,6 +36,7 @@ const activity: ResourceActivityEvidence = {
     idleMilliseconds: 6,
     utilization: 0.4,
   },
+  peakMemory: sample.memory,
   systemCpuMilliseconds: 3,
   userCpuMilliseconds: 5,
 };
@@ -51,6 +52,7 @@ function validEvidence(): ResourceRunEvidence {
     maxExternalBytes: 20,
     maxHeapUsedBytes: 10,
     maxPendingWritesAfterPhase: 0,
+    peakConcurrencyPostGcRssRangeBytes: 0,
     peakRssBytes: 60,
     maxBufferedBytesAfterPhase: 0,
     maxCapacityShortfallBytesAfterPhase: 0,
@@ -70,6 +72,7 @@ function validEvidence(): ResourceRunEvidence {
     maxExternalBytes: 200,
     maxHeapUsedBytes: 100,
     maxPendingWritesAfterPhase: 0,
+    maxPeakConcurrencyPostGcRssRangeBytes: 64,
     maxPeakRssBytes: 600,
     maxBufferedBytesAfterPhase: 0,
     maxCapacityShortfallBytesAfterPhase: 0,
@@ -81,6 +84,8 @@ function validEvidence(): ResourceRunEvidence {
   };
   const measuredPhase = (
     name:
+      | "buffer-limit-boundaries"
+      | `peak-concurrency-run-${number}`
       | "cancelled-streams"
       | "invalidation-during-write"
       | "overlapping-writes"
@@ -89,6 +94,13 @@ function validEvidence(): ResourceRunEvidence {
       | "upstream-stream-errors",
   ): ResourceRunEvidence["phases"][number] => ({
     activity,
+    concurrency: name.startsWith("peak-concurrency-run-")
+      ? {
+          bufferedBytesAtPeak: 32,
+          pendingWritesAtPeak: 8,
+          run: 1,
+        }
+      : null,
     name,
     releaseCheck: {
       acceptedBufferedBytes: 16,
@@ -111,19 +123,76 @@ function validEvidence(): ResourceRunEvidence {
       package: { name: "unicorn-nextjs-memory-cache", version: "0.0.0" },
       redis: { image: "redis:test", version: "8.2.1" },
     },
+    executionLimits: {
+      failureDiagnostics: {
+        enabled: false,
+        maxDiagnosticReports: 1,
+        maxHeapSnapshots: 1,
+      },
+      kernelLimits: {
+        cpuQuotaCores: 0.5,
+        memoryLimitBytes: 402_653_184,
+        reason: "Kernel quotas are only available on Linux",
+        status: "skipped",
+        swapLimitBytes: 0,
+      },
+      redisMemoryLimitBytes: 134_217_728,
+      timeoutMilliseconds: 60_000,
+      v8OldSpaceLimitBytes: 268_435_456,
+    },
+    failureArtifacts: [],
+    failureRerunCommand:
+      "pnpm --filter unicorn-nextjs-memory-cache measure:resources --seed 1 --failure-diagnostics",
+    limitExercise: {
+      aggregate: [
+        { attemptedBytes: 31, boundary: "below", outcome: "accepted", reason: null },
+        { attemptedBytes: 32, boundary: "at", outcome: "accepted", reason: null },
+        { attemptedBytes: 33, boundary: "above", outcome: "rejected", reason: "buffer-limit" },
+      ],
+      diagnostics: [
+        { event: "entry-rejected", limitBytes: 8, observedBytes: 9, reason: "entry-size-limit" },
+        { event: "entry-rejected", limitBytes: 32, observedBytes: 33, reason: "buffer-limit" },
+      ],
+      perEntry: [
+        { attemptedBytes: 7, boundary: "below", outcome: "accepted", reason: null },
+        { attemptedBytes: 8, boundary: "at", outcome: "accepted", reason: null },
+        {
+          attemptedBytes: 9,
+          boundary: "above",
+          outcome: "rejected",
+          reason: "entry-size-limit",
+        },
+      ],
+      previousValuesPreserved: true,
+      reservationsReleased: true,
+    },
     observations,
     phases: [
-      { activity: null, name: "post-warmup", releaseCheck: null, samples: [sample] },
+      {
+        activity: null,
+        concurrency: null,
+        name: "post-warmup",
+        releaseCheck: null,
+        samples: [sample],
+      },
       measuredPhase("steady-state-batch-1"),
+      measuredPhase("buffer-limit-boundaries"),
+      measuredPhase("peak-concurrency-run-1"),
       measuredPhase("rejected-oversized-entries"),
       measuredPhase("upstream-stream-errors"),
       measuredPhase("cancelled-streams"),
       measuredPhase("overlapping-writes"),
       measuredPhase("invalidation-during-write"),
-      { activity: null, name: "post-cleanup", releaseCheck: null, samples: [sample] },
+      {
+        activity: null,
+        concurrency: null,
+        name: "post-cleanup",
+        releaseCheck: null,
+        samples: [sample],
+      },
     ],
     reproductionCommand: "pnpm --filter unicorn-nextjs-memory-cache measure:resources --seed 1",
-    schemaVersion: 2,
+    schemaVersion: 3,
     thresholdEvaluation: evaluateResourceThresholds(observations, thresholds),
     thresholds,
     workload: {
@@ -135,6 +204,10 @@ function validEvidence(): ResourceRunEvidence {
       maxBufferedBytes: 16,
       maxEntrySizeBytes: 32,
       measurementBatches: 1,
+      peakConcurrentStreams: 8,
+      peakMaxBufferedBytes: 32,
+      peakMaxEntrySizeBytes: 8,
+      peakRuns: 1,
       readsPerBatch: 1,
       samplesPerPhase: 1,
       seed: 1,
@@ -163,6 +236,66 @@ describe("resource evidence verification", () => {
     expect(() => parseResourceRunEvidence(inconsistent)).toThrow(
       "Resource measurement child emitted malformed evidence",
     );
+  }, 1_000);
+
+  it("rejects boundary or concurrency claims that disagree with the requested workload", () => {
+    const evidence = validEvidence();
+    const incorrectBoundary = {
+      ...evidence,
+      limitExercise: {
+        ...evidence.limitExercise,
+        aggregate: [
+          { attemptedBytes: 30, boundary: "below", outcome: "accepted", reason: null },
+          ...evidence.limitExercise.aggregate.slice(1),
+        ],
+      },
+    };
+    const peakPhase = evidence.phases[3];
+    if (!peakPhase) throw new Error("Expected a peak phase");
+    const incorrectPeak = {
+      ...evidence,
+      phases: [
+        ...evidence.phases.slice(0, 3),
+        {
+          ...peakPhase,
+          concurrency: { bufferedBytesAtPeak: 31, pendingWritesAtPeak: 8, run: 1 },
+        },
+        ...evidence.phases.slice(4),
+      ],
+    };
+
+    expect(() => parseResourceRunEvidence(incorrectBoundary)).toThrow(
+      "Resource measurement child emitted malformed evidence",
+    );
+    expect(() => parseResourceRunEvidence(incorrectPeak)).toThrow(
+      "Resource measurement child emitted malformed evidence",
+    );
+  }, 1_000);
+
+  it("accepts exactly one report and heap snapshot only for an isolated diagnostic rerun", () => {
+    const evidence = validEvidence();
+    const diagnosticEvidence = {
+      ...evidence,
+      executionLimits: {
+        ...evidence.executionLimits,
+        failureDiagnostics: {
+          ...evidence.executionLimits.failureDiagnostics,
+          enabled: true,
+        },
+      },
+      failureArtifacts: ["failure-report.json", "failure.heapsnapshot"],
+    };
+
+    expect(parseResourceRunEvidence(diagnosticEvidence)).toBe(diagnosticEvidence);
+    expect(() =>
+      parseResourceRunEvidence({ ...evidence, failureArtifacts: ["unexpected-report.json"] }),
+    ).toThrow("Resource measurement child emitted malformed evidence");
+    expect(() =>
+      parseResourceRunEvidence({
+        ...diagnosticEvidence,
+        failureArtifacts: ["first.heapsnapshot", "second.heapsnapshot"],
+      }),
+    ).toThrow("Resource measurement child emitted malformed evidence");
   }, 1_000);
 
   it("preserves a failed verdict and phase evidence for retained handler bookkeeping", () => {

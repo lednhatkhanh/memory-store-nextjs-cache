@@ -12,6 +12,7 @@ export type ResourceObservations = Readonly<{
   maxExternalBytes: number;
   maxHeapUsedBytes: number;
   maxPendingWritesAfterPhase: number;
+  peakConcurrencyPostGcRssRangeBytes: number;
   peakRssBytes: number;
   maxBufferedBytesAfterPhase: number;
   maxCapacityShortfallBytesAfterPhase: number;
@@ -32,6 +33,7 @@ export type ResourceThresholds = Readonly<{
   maxExternalBytes: number;
   maxHeapUsedBytes: number;
   maxPendingWritesAfterPhase: number;
+  maxPeakConcurrencyPostGcRssRangeBytes: number;
   maxPeakRssBytes: number;
   maxBufferedBytesAfterPhase: number;
   maxCapacityShortfallBytesAfterPhase: number;
@@ -79,6 +81,10 @@ const thresholdRules: ThresholdRule[] = [
     threshold: "maxArrayBuffersAndBuffersBytes",
   },
   { metric: "maxCurrentRssBytes", threshold: "maxCurrentRssBytes" },
+  {
+    metric: "peakConcurrencyPostGcRssRangeBytes",
+    threshold: "maxPeakConcurrencyPostGcRssRangeBytes",
+  },
   { metric: "peakRssBytes", threshold: "maxPeakRssBytes" },
   { metric: "userCpuMilliseconds", threshold: "maxUserCpuMilliseconds" },
   { metric: "systemCpuMilliseconds", threshold: "maxSystemCpuMilliseconds" },
@@ -110,6 +116,7 @@ const observationProperties: Array<keyof ResourceObservations> = [
   "maxExternalBytes",
   "maxHeapUsedBytes",
   "maxPendingWritesAfterPhase",
+  "peakConcurrencyPostGcRssRangeBytes",
   "peakRssBytes",
   "maxBufferedBytesAfterPhase",
   "maxCapacityShortfallBytesAfterPhase",
@@ -130,6 +137,7 @@ const thresholdProperties: Array<keyof ResourceThresholds> = [
   "maxExternalBytes",
   "maxHeapUsedBytes",
   "maxPendingWritesAfterPhase",
+  "maxPeakConcurrencyPostGcRssRangeBytes",
   "maxPeakRssBytes",
   "maxBufferedBytesAfterPhase",
   "maxCapacityShortfallBytesAfterPhase",

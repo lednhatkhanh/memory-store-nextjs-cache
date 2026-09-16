@@ -26,3 +26,10 @@
   retained-payload fixture fails those gates. A seeded Node.js 24.21.0 / Darwin arm64 run exited
   naturally and passed with 73,192 bytes of retained heap growth, no retained external or
   ArrayBuffer growth, and no positive active-resource delta.
+- 2026-09-17: Re-verified the completed leak gate while adding issue 23's peak-concurrency phases.
+  The seeded production-bundle run still exercised every success and failure phase, recorded zero
+  buffered bytes and pending writes after each phase, accepted full configured capacity again, and
+  exited naturally after closing Redis. It passed with 66,784 bytes retained heap growth, zero
+  retained external and ArrayBuffer growth, and zero positive active-resource delta. The controlled
+  retained-payload fixture remains covered by the focused evaluator test, and the package test suite
+  passed all 40 tests.

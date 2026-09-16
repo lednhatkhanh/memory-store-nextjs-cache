@@ -3,6 +3,7 @@ node_modules/
 dist/
 .next/
 coverage/
+packages/cache/.resource-diagnostics/
 *.tsbuildinfo
 .env
 .env.*

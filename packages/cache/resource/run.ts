@@ -1,4 +1,5 @@
 import { execFileSync, fork, type ChildProcess } from "node:child_process";
+import { mkdir, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import type { StartedTestContainer } from "testcontainers";
@@ -7,7 +8,12 @@ import {
   DEFAULT_RESOURCE_THRESHOLDS,
   DEFAULT_RESOURCE_WORKLOAD,
   RESOURCE_CHILD_TIMEOUT_MILLISECONDS,
+  RESOURCE_CPU_QUOTA_CORES,
+  RESOURCE_KERNEL_MEMORY_LIMIT_BYTES,
+  RESOURCE_KERNEL_SWAP_LIMIT_BYTES,
   RESOURCE_REDIS_IMAGE,
+  RESOURCE_REDIS_MEMORY_LIMIT_BYTES,
+  RESOURCE_V8_OLD_SPACE_LIMIT_BYTES,
 } from "./config.ts";
 import {
   coordinateResourceMeasurement,
@@ -16,12 +22,14 @@ import {
   type RedisConnection,
 } from "./coordinator.ts";
 import { parseResourceRunEvidence } from "./evidence.ts";
-import type { ResourceWorkloadParameters } from "./evidence.ts";
+import type { ResourceExecutionLimitsEvidence, ResourceWorkloadParameters } from "./evidence.ts";
+import { applyKernelLimits } from "./kernel-limits.ts";
 import type { ResourceChildRequest } from "./protocol.ts";
 
 const REDIS_PORT = 6_379;
 const CHILD_TERMINATION_GRACE_MILLISECONDS = 2_000;
 const MAXIMUM_CHILD_ERROR_BYTES = 16 * 1_024;
+const MEBIBYTE = 1_024 * 1_024;
 
 function configureDockerHost(): void {
   // oxlint-disable-next-line node/no-process-env -- Testcontainers must follow the active Docker context.
@@ -44,6 +52,10 @@ async function createRedisResource(): Promise<DisposableRedisResource> {
   const { GenericContainer, Wait } = await import("testcontainers");
   const container: StartedTestContainer = await new GenericContainer(RESOURCE_REDIS_IMAGE)
     .withExposedPorts(REDIS_PORT)
+    .withResourcesQuota({
+      cpu: RESOURCE_CPU_QUOTA_CORES,
+      memory: RESOURCE_REDIS_MEMORY_LIMIT_BYTES / (1_024 * MEBIBYTE),
+    })
     .withStartupTimeout(60_000)
     .withWaitStrategy(Wait.forLogMessage("Ready to accept connections"))
     .start();
@@ -77,19 +89,33 @@ function appendBoundedError(current: string, chunk: Buffer): string {
   return `${current}${chunk.toString("utf8")}`.slice(-MAXIMUM_CHILD_ERROR_BYTES);
 }
 
-function workloadFromArguments(arguments_: string[]): ResourceWorkloadParameters {
-  if (arguments_.length === 0) return DEFAULT_RESOURCE_WORKLOAD;
+function optionsFromArguments(arguments_: string[]): Readonly<{
+  failureDiagnostics: boolean;
+  workload: ResourceWorkloadParameters;
+}> {
+  const failureDiagnostics = arguments_.includes("--failure-diagnostics");
+  const seedArguments = arguments_.filter((argument) => argument !== "--failure-diagnostics");
+  if (seedArguments.length === 0) {
+    return { failureDiagnostics, workload: DEFAULT_RESOURCE_WORKLOAD };
+  }
   const seedValue =
-    arguments_.length === 2 && arguments_[0] === "--seed"
-      ? arguments_[1]
-      : arguments_.length === 1 && arguments_[0]?.startsWith("--seed=")
-        ? arguments_[0].slice("--seed=".length)
+    seedArguments.length === 2 && seedArguments[0] === "--seed"
+      ? seedArguments[1]
+      : seedArguments.length === 1 && seedArguments[0]?.startsWith("--seed=")
+        ? seedArguments[0].slice("--seed=".length)
         : null;
   const seed = seedValue === null ? Number.NaN : Number(seedValue);
   if (!Number.isSafeInteger(seed) || seed < 0) {
     throw new Error("Resource measurement seed must be a non-negative safe integer");
   }
-  return { ...DEFAULT_RESOURCE_WORKLOAD, seed };
+  return { failureDiagnostics, workload: { ...DEFAULT_RESOURCE_WORKLOAD, seed } };
+}
+
+async function prepareFailureDiagnosticsDirectory(seed: number): Promise<string> {
+  const directory = fileURLToPath(new URL(`../.resource-diagnostics/${seed}/`, import.meta.url));
+  await rm(directory, { force: true, recursive: true });
+  await mkdir(directory, { recursive: true });
+  return directory;
 }
 
 async function waitForExitWithin(
@@ -110,12 +136,27 @@ async function waitForExitWithin(
   });
 }
 
-function createMeasurementChild(
+async function createMeasurementChild(
   connection: RedisConnection,
   workload: ResourceWorkloadParameters,
-): MeasurementChild {
+  failureDiagnostics: boolean,
+): Promise<MeasurementChild> {
+  const failureDiagnosticsDirectory = failureDiagnostics
+    ? await prepareFailureDiagnosticsDirectory(workload.seed)
+    : null;
+  const execArgv = [
+    "--expose-gc",
+    `--max-old-space-size=${RESOURCE_V8_OLD_SPACE_LIMIT_BYTES / MEBIBYTE}`,
+  ];
+  if (failureDiagnosticsDirectory) {
+    execArgv.push(
+      "--report-exclude-env",
+      "--report-exclude-network",
+      `--report-directory=${failureDiagnosticsDirectory}`,
+    );
+  }
   const child = fork(fileURLToPath(new URL("./workload-child.ts", import.meta.url)), [], {
-    execArgv: ["--expose-gc"],
+    execArgv,
     stdio: ["ignore", "ignore", "pipe", "ipc"],
   });
   const exit =
@@ -138,9 +179,30 @@ function createMeasurementChild(
       receivedMessage.reject(childFailureMessage(code, signal, standardError));
     }
   });
+  if (!child.pid) {
+    child.kill("SIGKILL");
+    throw new Error("Resource measurement child did not report a process ID");
+  }
+  const kernelLimits = await applyKernelLimits(child.pid, {
+    cpuQuotaCores: RESOURCE_CPU_QUOTA_CORES,
+    memoryLimitBytes: RESOURCE_KERNEL_MEMORY_LIMIT_BYTES,
+    swapLimitBytes: RESOURCE_KERNEL_SWAP_LIMIT_BYTES,
+  });
 
   const request: ResourceChildRequest = {
     connection,
+    executionLimits: {
+      failureDiagnostics: {
+        enabled: failureDiagnostics,
+        maxDiagnosticReports: 1,
+        maxHeapSnapshots: 1,
+      },
+      kernelLimits: kernelLimits.evidence,
+      redisMemoryLimitBytes: RESOURCE_REDIS_MEMORY_LIMIT_BYTES,
+      timeoutMilliseconds: RESOURCE_CHILD_TIMEOUT_MILLISECONDS,
+      v8OldSpaceLimitBytes: RESOURCE_V8_OLD_SPACE_LIMIT_BYTES,
+    } satisfies ResourceExecutionLimitsEvidence,
+    failureDiagnosticsDirectory,
     redisImage: RESOURCE_REDIS_IMAGE,
     thresholds: DEFAULT_RESOURCE_THRESHOLDS,
     type: "start-resource-measurement",
@@ -156,27 +218,38 @@ function createMeasurementChild(
     }
     return value;
   });
+  let kernelLimitsCleaned = false;
+  const cleanupKernelLimits = async (): Promise<void> => {
+    if (kernelLimitsCleaned) return;
+    kernelLimitsCleaned = true;
+    await kernelLimits.cleanup();
+  };
 
   return {
     message,
     async terminate() {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      child.kill("SIGTERM");
-      const exited = exit.promise.then(() => true as const);
-      if (!(await waitForExitWithin(child, exited, CHILD_TERMINATION_GRACE_MILLISECONDS))) {
-        child.kill("SIGKILL");
+      try {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        child.kill("SIGTERM");
+        const exited = exit.promise.then(() => true as const);
         if (!(await waitForExitWithin(child, exited, CHILD_TERMINATION_GRACE_MILLISECONDS))) {
-          throw new Error("Resource measurement child could not be terminated");
+          child.kill("SIGKILL");
+          if (!(await waitForExitWithin(child, exited, CHILD_TERMINATION_GRACE_MILLISECONDS))) {
+            throw new Error("Resource measurement child could not be terminated");
+          }
         }
+      } finally {
+        await cleanupKernelLimits();
       }
     },
   };
 }
 
 async function main(): Promise<void> {
-  const workload = workloadFromArguments(process.argv.slice(2));
+  const options = optionsFromArguments(process.argv.slice(2));
   const evidence = await coordinateResourceMeasurement({
-    createChild: (connection) => createMeasurementChild(connection, workload),
+    createChild: async (connection) =>
+      createMeasurementChild(connection, options.workload, options.failureDiagnostics),
     createRedisResource,
     parseEvidence: parseResourceRunEvidence,
     timeoutMilliseconds: RESOURCE_CHILD_TIMEOUT_MILLISECONDS,

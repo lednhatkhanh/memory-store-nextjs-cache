@@ -61,6 +61,11 @@ describe("resource threshold evaluation", () => {
           threshold: 134_217_728,
         },
         {
+          actual: 104_857_600,
+          metric: "peakConcurrencyPostGcRssRangeBytes",
+          threshold: 67_108_864,
+        },
+        {
           actual: 209_715_200,
           metric: "peakRssBytes",
           threshold: 167_772_160,

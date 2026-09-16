@@ -14,11 +14,6 @@ const config: RspackOptions = {
   },
   externals: ["ioredis"],
   externalsType: "modern-module",
-  resolve: {
-    extensionAlias: {
-      ".js": [".ts", ".js"],
-    },
-  },
   target: "node24",
   module: {
     rules: [

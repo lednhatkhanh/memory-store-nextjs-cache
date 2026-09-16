@@ -8,7 +8,7 @@ import {
   isResourceThresholds,
   type ResourceObservations,
   type ResourceThresholds,
-} from "../resource/thresholds.js";
+} from "../resource/thresholds.ts";
 
 type ThresholdFixture = {
   observations: ResourceObservations;

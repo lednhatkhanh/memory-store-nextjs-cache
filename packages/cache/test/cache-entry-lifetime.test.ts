@@ -4,7 +4,7 @@ import {
   getCacheEntryFreshness,
   getCacheTagFreshness,
   type CacheEntryMetadata,
-} from "../src/index.js";
+} from "../src/index.ts";
 
 const SECOND = 1_000;
 

@@ -29,7 +29,7 @@ claim for untested versions or deployment shapes.
   prefetching or client-side navigation. Match the server `lang` and `dir` attributes with the
   client `I18nProvider` locale.
 - Style the reference UI with Tailwind CSS utilities and keep shared design tokens as CSS variables
-  in `app/styles.css`. Oxfmt sorts utility classes against that stylesheet.
+  in `src/app/styles.css`. Oxfmt sorts utility classes against that stylesheet.
 - Make cache behavior observable through public seams such as HTTP responses, rendered UI, source
   read counts, browser navigation, and supported Next.js diagnostics.
 - Place scenario controls and fault injection in tests, support modules, or support services. Keep

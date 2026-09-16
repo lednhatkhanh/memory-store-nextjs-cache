@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 
-import { createRedisCacheHandler, type RedisCacheHandler } from "./index.js";
+import { createRedisCacheHandler, type RedisCacheHandler } from "./index.ts";
 
 const client = new Redis(process.env["REDIS_URL"] ?? "redis://127.0.0.1:6379", {
   lazyConnect: true,

@@ -4,7 +4,7 @@ import {
   decodeCacheEntry,
   encodeCacheEntry,
   type CacheEntryMetadata,
-} from "../src/cache-entry-codec.js";
+} from "../src/cache-entry-codec.ts";
 
 const encoder = new TextEncoder();
 

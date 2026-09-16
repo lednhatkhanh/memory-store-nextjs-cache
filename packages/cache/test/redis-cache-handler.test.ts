@@ -11,7 +11,7 @@ import {
   type CacheEntry,
   type RedisCacheDiagnostic,
   getCacheEntryFreshness,
-} from "../src/index.js";
+} from "../src/index.ts";
 
 const REDIS_PORT = 6379;
 

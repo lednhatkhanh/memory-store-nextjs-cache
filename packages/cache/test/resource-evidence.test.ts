@@ -5,8 +5,8 @@ import {
   type ResourceActivityEvidence,
   type ResourceRunEvidence,
   type ResourceSampleEvidence,
-} from "../resource/evidence.js";
-import { evaluateResourceThresholds } from "../resource/thresholds.js";
+} from "../resource/evidence.ts";
+import { evaluateResourceThresholds } from "../resource/thresholds.ts";
 
 const sample: ResourceSampleEvidence = {
   activeResourceTypes: { PipeWrap: 1 },

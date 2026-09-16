@@ -24,6 +24,8 @@ read `apps/web/README.md`. It defines the application's dual reference-and-verif
   rule above.
 - Keep workspace code ESM-only and strictly typed. Test behavior through exported APIs, HTTP routes,
   rendered UI, or another public seam.
+- Prefer functions and functional composition over classes and object-oriented designs. Use a class
+  only when a framework contract or stateful resource lifecycle makes it the clearer fit.
 - Import from the module that owns a symbol; do not create barrel-only re-export files. Prefer
   `type` aliases over TypeScript `interface`, and prefer named exports. Default exports remain
   acceptable when a framework or tool contract expects them.

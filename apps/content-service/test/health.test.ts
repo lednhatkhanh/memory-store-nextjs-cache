@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createContentService } from "../src/app.js";
+import { createContentService } from "../src/app.ts";
 
 describe("content service HTTP seam", () => {
   const services: Array<ReturnType<typeof createContentService>> = [];

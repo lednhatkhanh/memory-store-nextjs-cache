@@ -8,7 +8,7 @@
     "check-types": "next typegen && tsc --noEmit",
     "dev": "next dev",
     "format:check": "oxfmt --check .",
-    "lint": "oxlint --type-aware --report-unused-disable-directives app components lib test next.config.ts",
+    "lint": "oxlint --type-aware --report-unused-disable-directives src test next.config.ts",
     "start": "next start",
     "test": "next build && vitest run"
   },

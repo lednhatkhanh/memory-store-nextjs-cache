@@ -4,7 +4,7 @@ import {
   coordinateResourceMeasurement,
   type DisposableRedisResource,
   type MeasurementChild,
-} from "../resource/coordinator.js";
+} from "../resource/coordinator.ts";
 
 const validEvidence = { schemaVersion: 1 } as const;
 

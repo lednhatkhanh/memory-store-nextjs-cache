@@ -4,17 +4,17 @@ import { secondsToMilliseconds } from "date-fns/secondsToMilliseconds";
 import { uniq } from "es-toolkit";
 import type { Redis } from "ioredis";
 
-import { decodeCacheEntry, encodeCacheEntry, type CacheEntry } from "./cache-entry-codec.js";
-import { getCacheEntryFreshness, getCacheTagFreshness } from "./cache-entry-lifetime.js";
+import { decodeCacheEntry, encodeCacheEntry, type CacheEntry } from "./cache-entry-codec.ts";
+import { getCacheEntryFreshness, getCacheTagFreshness } from "./cache-entry-lifetime.ts";
 
 export {
   getCacheEntryFreshness,
   type CacheEntryFreshness,
   getCacheTagFreshness,
   type CacheTagTimestamps,
-} from "./cache-entry-lifetime.js";
+} from "./cache-entry-lifetime.ts";
 
-export type { CacheEntry, CacheEntryMetadata } from "./cache-entry-codec.js";
+export type { CacheEntry, CacheEntryMetadata } from "./cache-entry-codec.ts";
 
 /** The package name is exported as a minimal executable workspace smoke seam. */
 export const packageIdentity = "unicorn-nextjs-memory-cache";

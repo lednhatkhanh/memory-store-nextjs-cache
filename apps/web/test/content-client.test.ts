@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { getContentServiceHealth, getPublishedDocument } from "../lib/content-client.js";
+import { getContentServiceHealth, getPublishedDocument } from "../src/lib/content-client";
 
 describe("content service HTTP client", () => {
   it("returns a typed health response", async () => {

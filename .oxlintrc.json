@@ -46,7 +46,7 @@
       }
     },
     {
-      "files": ["apps/web/app/layout.tsx"],
+      "files": ["apps/web/src/app/layout.tsx"],
       "rules": {
         "import/no-unassigned-import": "off"
       }

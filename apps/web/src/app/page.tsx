@@ -7,7 +7,7 @@ export default function HomePage() {
         <p className="text-xs font-bold tracking-[0.14em] text-accent uppercase">
           Next.js cache handler reference
         </p>
-        <h1 className="mt-3 text-4xl leading-none font-black tracking-[-0.05em] text-balance sm:text-6xl">
+        <h1 className="mt-3 text-4xl leading-none font-black tracking-tighter text-balance sm:text-6xl">
           Markdown content, cached remotely
         </h1>
         <p className="mt-6 max-w-2xl text-lg leading-8 text-muted">

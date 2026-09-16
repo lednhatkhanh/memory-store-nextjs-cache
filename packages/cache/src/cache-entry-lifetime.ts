@@ -1,6 +1,6 @@
 import { secondsToMilliseconds } from "date-fns/secondsToMilliseconds";
 
-import type { CacheEntryMetadata } from "./cache-entry-codec.js";
+import type { CacheEntryMetadata } from "./cache-entry-codec.ts";
 
 export type CacheEntryFreshness = "expired" | "fresh" | "stale";
 

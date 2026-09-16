@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { packageIdentity } from "../src/index.js";
+import { packageIdentity } from "../src/index.ts";
 
 describe("cache package workspace seam", () => {
   it("exposes its stable package identity", () => {

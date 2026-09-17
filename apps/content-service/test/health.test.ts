@@ -167,4 +167,50 @@ describe("content service HTTP seam", () => {
     });
     expect(currentRead.json()).toMatchObject({ revision: "revision-2" });
   });
+
+  it("fails, recovers, and confirms deletion for a selected source document", async () => {
+    const service = createContentService();
+    services.push(service);
+
+    const failResponse = await service.inject({
+      method: "PUT",
+      url: "/__test/source-failures/reference/en/welcome",
+    });
+    expect(failResponse.statusCode).toBe(200);
+    expect(failResponse.json()).toEqual({ failing: true });
+
+    const failedRead = await service.inject({
+      method: "GET",
+      url: "/documents/reference/en/welcome",
+    });
+    expect(failedRead.statusCode).toBe(503);
+    expect(failedRead.json()).toEqual({ message: "Published content source unavailable" });
+
+    const recoverResponse = await service.inject({
+      method: "DELETE",
+      url: "/__test/source-failures/reference/en/welcome",
+    });
+    expect(recoverResponse.statusCode).toBe(200);
+    expect(recoverResponse.json()).toEqual({ recovered: true });
+
+    const recoveredRead = await service.inject({
+      method: "GET",
+      url: "/documents/reference/en/welcome",
+    });
+    expect(recoveredRead.statusCode).toBe(200);
+
+    const deleteResponse = await service.inject({
+      method: "DELETE",
+      url: "/__test/documents/reference/en/welcome",
+    });
+    expect(deleteResponse.statusCode).toBe(200);
+    expect(deleteResponse.json()).toEqual({ deleted: true });
+
+    const missingRead = await service.inject({
+      method: "GET",
+      url: "/documents/reference/en/welcome",
+    });
+    expect(missingRead.statusCode).toBe(404);
+    expect(missingRead.json()).toEqual({ message: "Published document not found" });
+  });
 });

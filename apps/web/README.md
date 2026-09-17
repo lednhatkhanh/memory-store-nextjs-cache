@@ -131,19 +131,20 @@ dataset remains a separate operational scenario.
 
 Set these environment variables when running the reference application:
 
-| Variable                           | Default                     | Purpose                                                                    |
-| ---------------------------------- | --------------------------- | -------------------------------------------------------------------------- |
-| `REDIS_URL`                        | `redis://127.0.0.1:6379`    | ioredis connection URL used by the package's default Next.js handler.      |
-| `REDIS_CACHE_NAMESPACE`            | `memory-store-nextjs-cache` | Stable public application identity used in the cache deployment scope.     |
-| `REDIS_CACHE_ENVIRONMENT`          | `development`               | Deployment environment, such as `staging` or `production`.                 |
-| `REDIS_CACHE_RELEASE`              | `local`                     | Entry serialization and behavior release identifier.                       |
-| `REDIS_CACHE_SITE`                 | `reference`                 | Validated public site used by both cache namespace and content reads.      |
-| `REDIS_CACHE_LOCALE`               | `en`                        | Validated public locale used by both cache namespace and content reads.    |
-| `REDIS_CACHE_MAX_ENTRY_SIZE_BYTES` | `8388608`                   | Maximum metadata plus raw streamed bytes accepted for one cache entry.     |
-| `REDIS_CACHE_MAX_BUFFERED_BYTES`   | `33554432`                  | Maximum raw stream bytes buffered by one handler across concurrent writes. |
-| `CONTENT_SERVICE_URL`              | `http://127.0.0.1:3100`     | Base URL for the published-content source used by the reference route.     |
-| `CACHE_INSTANCE_ID`                | Current process ID          | Safe instance label included in cache hit/miss diagnostics.                |
-| `REVALIDATION_SECRET`              | None                        | Bearer secret required by the publication revalidation webhook.            |
+| Variable                               | Default                     | Purpose                                                                    |
+| -------------------------------------- | --------------------------- | -------------------------------------------------------------------------- |
+| `REDIS_URL`                            | `redis://127.0.0.1:6379`    | ioredis connection URL used by the package's default Next.js handler.      |
+| `REDIS_CACHE_NAMESPACE`                | `memory-store-nextjs-cache` | Stable public application identity used in the cache deployment scope.     |
+| `REDIS_CACHE_ENVIRONMENT`              | `development`               | Deployment environment, such as `staging` or `production`.                 |
+| `REDIS_CACHE_RELEASE`                  | `local`                     | Entry serialization and behavior release identifier.                       |
+| `REDIS_CACHE_SITE`                     | `reference`                 | Validated public site used by both cache namespace and content reads.      |
+| `REDIS_CACHE_LOCALE`                   | `en`                        | Validated public locale used by both cache namespace and content reads.    |
+| `REDIS_CACHE_MAX_ENTRY_SIZE_BYTES`     | `8388608`                   | Maximum metadata plus raw streamed bytes accepted for one cache entry.     |
+| `REDIS_CACHE_MAX_BUFFERED_BYTES`       | `33554432`                  | Maximum raw stream bytes buffered by one handler across concurrent writes. |
+| `CONTENT_SERVICE_URL`                  | `http://127.0.0.1:3100`     | Base URL for the published-content source used by the reference route.     |
+| `CONTENT_SERVICE_TIMEOUT_MILLISECONDS` | `2000`                      | Positive deadline for authoritative published-content reads.               |
+| `CACHE_INSTANCE_ID`                    | Current process ID          | Safe instance label included in cache hit/miss diagnostics.                |
+| `REVALIDATION_SECRET`                  | None                        | Bearer secret required by the publication revalidation webhook.            |
 
 The application owns these partitioning inputs at its environment boundary. Its configuration
 module validates all five values before rendering: the deployment system supplies application,
@@ -173,10 +174,21 @@ not the server-side fresh-to-SWR boundary.
 
 After publishing a document, an authorized system can send those dimensions as JSON to
 `POST /api/revalidate/content` with `Authorization: Bearer <REVALIDATION_SECRET>`. The Route Handler
-uses `revalidateTag(tag, { expire: 0 })`, the production-appropriate Next.js boundary for immediate
-expiration from a webhook or other external system. The cache handler records tag staleness and
-expiration timestamps in namespace-scoped Redis sorted sets. Every instance consults that durable
-state when reading an entry, so correctness does not depend on Pub/Sub or process-local state.
+first awaits `propagateRedisCacheInvalidation()` against the durable Redis tag state. Only after it
+succeeds does the route call Next.js `revalidateTag()` to update framework request-local and
+built-in state. Redis failure returns `503` with `revalidated: false`; the publisher can retry, and
+the route never translates failed propagation into success. The cache handler records tag
+staleness and expiration timestamps in namespace-scoped Redis sorted sets. Every instance consults
+that durable state when reading an entry, so correctness does not depend on Pub/Sub or process-local
+state.
+
+Cache reads fail open to a fresh source render, bounded by
+`CONTENT_SERVICE_TIMEOUT_MILLISECONDS`. A confirmed source `404` calls Next.js `notFound()` and
+renders the shared missing-content UI. A source timeout, `5xx`, or network outage remains an
+unavailable error and renders the route error boundary with a retry control. These freshness-
+critical public routes do not serve an unverified last-good value: when Redis cannot establish
+freshness and the source is unavailable, the explicit unavailable state wins. The checked-in
+loading boundary remains visible while the authoritative read is pending.
 
 The `/path-cache-demo/[slug]` route demonstrates the complementary implicit-tag path. Its page,
 dynamic metadata, and segment layout read the same published document through distinct

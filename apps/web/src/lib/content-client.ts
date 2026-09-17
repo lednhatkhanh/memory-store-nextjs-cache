@@ -1,4 +1,4 @@
-import ky, { type Options } from "ky";
+import ky, { HTTPError, type Options } from "ky";
 
 export type ContentServiceHealth = {
   status: "ok";
@@ -17,6 +17,13 @@ export type PublishedDocument = PublicContentDimensions & {
   revision: string;
   title: string;
 };
+
+export type ContentSourceError = Error & {
+  code: "CONTENT_NOT_FOUND" | "CONTENT_UNAVAILABLE";
+  statusCode: number;
+};
+
+const DEFAULT_CONTENT_SOURCE_TIMEOUT_MILLISECONDS = 2_000;
 
 const publicDimensionPatterns = {
   locale: /^[a-z]{2}(?:-[A-Z]{2})?$/u,
@@ -55,11 +62,30 @@ export async function getContentServiceHealth(
 export async function getPublishedDocument(
   serviceUrl: string | URL,
   dimensions: PublicContentDimensions,
-  options: Pick<Options, "fetch"> = {},
+  options: Pick<Options, "fetch" | "timeout"> = {},
 ): Promise<PublishedDocument> {
   const validated = validatePublicContentDimensions(dimensions);
   const baseUrl = new URL(serviceUrl);
   baseUrl.pathname = `${baseUrl.pathname.replace(/\/$/u, "")}/documents/${validated.site}/${validated.locale}/${validated.slug}`;
 
-  return ky.get(baseUrl, { ...options, retry: 0 }).json<PublishedDocument>();
+  try {
+    return await ky
+      .get(baseUrl, {
+        ...options,
+        retry: 0,
+        timeout: options.timeout ?? DEFAULT_CONTENT_SOURCE_TIMEOUT_MILLISECONDS,
+      })
+      .json<PublishedDocument>();
+  } catch (error) {
+    const missing = error instanceof HTTPError && error.response.status === 404;
+    throw Object.assign(
+      new Error(missing ? "Published document not found" : "Published content source unavailable", {
+        cause: error,
+      }),
+      {
+        code: missing ? "CONTENT_NOT_FOUND" : "CONTENT_UNAVAILABLE",
+        statusCode: missing ? 404 : error instanceof HTTPError ? error.response.status : 503,
+      } satisfies Pick<ContentSourceError, "code" | "statusCode">,
+    );
+  }
 }

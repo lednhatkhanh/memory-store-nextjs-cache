@@ -31,6 +31,35 @@ The packaged `next-handler` maps `REDIS_CACHE_NAMESPACE`, `REDIS_CACHE_ENVIRONME
 defaults are for development; deployments should set every value explicitly and change the release
 identifier whenever cached serialization or interpretation becomes incompatible.
 
+## Failure policy and Redis topology
+
+The verified deployment topology is one standalone Redis primary endpoint, matching a Memorystore
+for Redis primary endpoint. Each application process owns one ioredis client. A TCP connection and
+an individual command each time out after one second, a request receives at most one ioredis retry,
+and the offline command queue plus automatic replay of unfulfilled commands are disabled. The
+single client reconnects with exponential delays capped at one second; a `READONLY` response also
+causes a reconnect but never automatically resends the failed command. This bounds request work and
+prevents disconnected processes from accumulating an unbounded queue while still allowing the
+client to recover when the primary endpoint returns. Explicit publication propagation waits at most
+two seconds for a newly created client to become ready before it issues the bounded invalidation
+command; ordinary cache reads and writes do not wait for readiness or enter an offline queue.
+
+A failed cache read is an observable safe miss: the handler returns `undefined`, allowing Next.js
+to run the authoritative source render. A failed cache write is reported but does not fail that
+fresh render or modify the last complete Redis value. `getExpiration()` fails closed with
+`Infinity`, and tag-metadata maintenance failure is observable without blocking the source
+fallback. Publication invalidation is different: `updateTags()` and the public
+`propagateRedisCacheInvalidation()` seam reject, so callers can return a retryable unavailable
+response and must not acknowledge propagation.
+
+The handler emits fixed-shape diagnostics for cache read hit, miss, source fallback and latency;
+write failure; invalidation failure; tag-refresh failure; size rejection; safety miss; and rejected
+stale writes. The packaged handler adds only its bounded instance label. It does not log content,
+credentials, namespaces, tags, or raw cache keys. Cache Components deduplicates concurrent renders
+for one key; the production integration scenario issues eight concurrent requests during a Redis
+command outage and observes exactly one source read. No last-good entry is served when Redis cannot
+establish its freshness.
+
 ## Resource measurement
 
 Run the isolated resource harness from the workspace root:

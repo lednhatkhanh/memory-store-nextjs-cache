@@ -113,6 +113,7 @@ export function createContentService(
   );
   const readCounts = new Map<string, number>();
   const responsePauses = new Map<string, ResponsePause>();
+  const sourceFailures = new Set<string>();
 
   service.get("/health", async () => ({ status: "ok" }));
 
@@ -128,6 +129,30 @@ export function createContentService(
       const document = { ...request.params, ...request.body };
       documents.set(documentKey(request.params), document);
       return document;
+    },
+  );
+
+  service.delete<{ Params: PublicContentDimensions }>(
+    "/__test/documents/:site/:locale/:slug",
+    { schema: { params: dimensionParametersSchema } },
+    async (request) => ({ deleted: documents.delete(documentKey(request.params)) }),
+  );
+
+  service.put<{ Params: PublicContentDimensions }>(
+    "/__test/source-failures/:site/:locale/:slug",
+    { schema: { params: dimensionParametersSchema } },
+    async (request) => {
+      sourceFailures.add(documentKey(request.params));
+      return { failing: true };
+    },
+  );
+
+  service.delete<{ Params: PublicContentDimensions }>(
+    "/__test/source-failures/:site/:locale/:slug",
+    { schema: { params: dimensionParametersSchema } },
+    async (request) => {
+      sourceFailures.delete(documentKey(request.params));
+      return { recovered: true };
     },
   );
 
@@ -188,6 +213,9 @@ export function createContentService(
       }
 
       readCounts.set(key, (readCounts.get(key) ?? 0) + 1);
+      if (sourceFailures.has(key)) {
+        return reply.code(503).send({ message: "Published content source unavailable" });
+      }
       let pause: ResponsePause | undefined;
       for (const candidate of responsePauses.values()) {
         if (candidate.state === "armed" && documentKey(candidate.dimensions) === key) {
@@ -229,6 +257,7 @@ export function createContentService(
         pause.resolveRelease();
       }
       responsePauses.clear();
+      sourceFailures.clear();
       documents.clear();
       readCounts.clear();
       for (const document of request.body.documents) {

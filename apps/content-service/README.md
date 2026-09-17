@@ -14,6 +14,14 @@ The `__test` commit, read-count, and reset endpoints remain deterministic integr
 facilities. A reset replaces the file-backed startup snapshot for the lifetime of that service
 process; it does not write to disk.
 
+Deterministic failure scenarios can mark one existing document unavailable with
+`PUT /__test/source-failures/:site/:locale/:slug` and recover it with the matching `DELETE` request.
+The public document route returns `503` while the fault is armed. Confirm a publication deletion
+with `DELETE /__test/documents/:site/:locale/:slug`; subsequent public reads return `404`. Reset
+clears all armed failures. Together with the response-pause barrier below, these controls provide
+source failure, recovery, confirmed deletion, and deterministic delay without placing fault
+injection in the reference application.
+
 Race scenarios can arm `PUT /__test/response-pauses/:pauseId` with content dimensions. The next
 matching document response captures its current revision, signals it through the long-polling
 `GET /__test/response-pauses/:pauseId/reached` endpoint, and waits until

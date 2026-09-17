@@ -2,7 +2,7 @@
 
 import { Button } from "../../../components/button";
 
-export default function CacheDemoError({ reset }: { reset: () => void }) {
+export default function CacheDemoError({ retry }: { retry: () => void }) {
   return (
     <main className="grid min-h-screen place-items-center px-4 py-10 sm:px-8">
       <section className="w-full max-w-3xl rounded-3xl border border-outline bg-panel p-8 shadow-panel sm:p-12">
@@ -17,7 +17,7 @@ export default function CacheDemoError({ reset }: { reset: () => void }) {
         </p>
         <Button
           className="mt-8 rounded-full bg-accent px-5 py-3 font-bold text-white transition data-focus-visible:outline-2 data-focus-visible:outline-offset-2 data-focus-visible:outline-accent data-hovered:brightness-95 data-pressed:brightness-90"
-          onPress={reset}
+          onPress={retry}
         >
           Try again
         </Button>

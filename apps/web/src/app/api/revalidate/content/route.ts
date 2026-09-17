@@ -1,4 +1,5 @@
 import { revalidateTag } from "next/cache";
+import { propagateRedisCacheInvalidation } from "unicorn-nextjs-memory-cache/next-handler";
 
 import { referenceApplicationConfig } from "../../../../lib/application-config";
 import { getPublishedDocumentCacheTag } from "../../../../lib/cached-content";
@@ -56,9 +57,20 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ message: "Content partition is not configured" }, { status: 400 });
   }
 
+  const tag = getPublishedDocumentCacheTag(dimensions);
+  const durations = body.policy === "stale-while-revalidate" ? { expire: 2 } : { expire: 0 };
+  try {
+    await propagateRedisCacheInvalidation([tag], durations);
+  } catch {
+    return Response.json(
+      { message: "Publication invalidation unavailable", revalidated: false },
+      { status: 503 },
+    );
+  }
+
   revalidateTag(
-    getPublishedDocumentCacheTag(dimensions),
-    body.policy === "stale-while-revalidate" ? "briefStaleContentRefresh" : { expire: 0 },
+    tag,
+    body.policy === "stale-while-revalidate" ? "briefStaleContentRefresh" : durations,
   );
   return Response.json({ revalidated: true });
 }

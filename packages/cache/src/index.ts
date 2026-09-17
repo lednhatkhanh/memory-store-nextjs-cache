@@ -43,6 +43,24 @@ export type RedisCacheResourceState = Readonly<{
 
 export type RedisCacheDiagnostic =
   | Readonly<{
+      durationMilliseconds: number;
+      event: "cache-read";
+      result: "hit" | "miss" | "source-fallback";
+    }>
+  | Readonly<{
+      event: "cache-write-failure";
+    }>
+  | Readonly<{
+      event: "invalidation-failure";
+    }>
+  | Readonly<{
+      event: "tag-refresh-failure";
+    }>
+  | Readonly<{
+      event: "stale-write-rejected";
+      reason: "invalidation-fence" | "newer-entry";
+    }>
+  | Readonly<{
       event: "entry-rejected";
       limitBytes: number;
       observedBytes: number;
@@ -413,12 +431,13 @@ export function createRedisCacheHandler(
     DEFAULT_MAX_BUFFERED_BYTES,
     "maxBufferedBytes",
   );
-  const pendingSets = new Map<string, Promise<void>>();
-  let metadataGenerationPromise: Promise<string> | undefined;
+  const pendingSets = new Map<string, { promise: Promise<void> }>();
+  let metadataGenerationPromise: Promise<string> | null = null;
   let bufferedBytes = 0;
 
   const getMetadataGeneration = async (): Promise<string> => {
-    metadataGenerationPromise ??= client
+    if (metadataGenerationPromise) return metadataGenerationPromise;
+    const pendingGeneration = client
       .eval(
         initializeMetadataControlScript,
         2,
@@ -432,7 +451,13 @@ export function createRedisCacheHandler(
         }
         return generation;
       });
-    return metadataGenerationPromise;
+    metadataGenerationPromise = pendingGeneration;
+    try {
+      return await pendingGeneration;
+    } catch (error) {
+      if (metadataGenerationPromise === pendingGeneration) metadataGenerationPromise = null;
+      throw error;
+    }
   };
 
   const emitDiagnostic = (diagnostic: RedisCacheDiagnostic): void => {
@@ -565,167 +590,221 @@ export function createRedisCacheHandler(
 
   return {
     async get(cacheKey, softTags): Promise<CacheEntry | undefined> {
+      const startedAt = performance.now();
+      const reportRead = (result: "hit" | "miss" | "source-fallback"): void => {
+        emitDiagnostic({
+          durationMilliseconds: Math.max(0, Math.round(performance.now() - startedAt)),
+          event: "cache-read",
+          result,
+        });
+      };
+      let entry: CacheEntry | undefined;
       try {
-        await pendingSets.get(cacheKey);
+        await pendingSets.get(cacheKey)?.promise;
       } catch {
         // The failed replacement was never published; fall back to the last complete value.
       }
-      const expectedGeneration = await getMetadataGeneration();
-      const [stored, storedGeneration] = await client.mget(
-        redisKey(entryKeySpace, cacheKey),
-        redisEntryGenerationKey(entryKeySpace, cacheKey),
-      );
-      let entry: CacheEntry | undefined;
-      const now = nowInEpochMilliseconds();
-      if (typeof stored === "string") {
-        if (storedGeneration !== expectedGeneration) {
-          emitDiagnostic({
-            event: "safety-miss",
-            operation: "read",
-            reason:
-              typeof storedGeneration === "string"
+      try {
+        const expectedGeneration = await getMetadataGeneration();
+        const [stored, storedGeneration] = await client.mget(
+          redisKey(entryKeySpace, cacheKey),
+          redisEntryGenerationKey(entryKeySpace, cacheKey),
+        );
+        const now = nowInEpochMilliseconds();
+        if (typeof stored === "string") {
+          if (storedGeneration !== expectedGeneration) {
+            emitDiagnostic({
+              event: "safety-miss",
+              operation: "read",
+              reason:
+                typeof storedGeneration === "string"
+                  ? "tag-metadata-incompatible"
+                  : "tag-metadata-absent",
+            });
+            reportRead("miss");
+            return entry;
+          }
+          const restored = decodeCacheEntry(stored);
+          if (!restored) {
+            await observeProspectiveSoftTags(cacheKey, softTags, now);
+            reportRead("miss");
+            return entry;
+          }
+          if (getCacheEntryFreshness(restored, now) === "expired") {
+            await observeProspectiveSoftTags(cacheKey, softTags, now);
+            reportRead("miss");
+            return entry;
+          }
+          const tags = uniq([...restored.tags, ...softTags]);
+          const tagMetadata = await getTagMetadata(
+            client,
+            deploymentKeySpace,
+            tags,
+            expectedGeneration,
+          );
+          const explicitTags = new Set(restored.tags);
+          const repairableSoftTags = tags.filter(
+            (tag, index) =>
+              tagMetadata.issues[index] === "tag-metadata-absent" &&
+              !explicitTags.has(tag) &&
+              tagMetadata.metadataFloor < restored.timestamp,
+          );
+          const softTagsEnsured = await ensureTagMetadata(
+            repairableSoftTags,
+            restored.timestamp,
+            restored.timestamp + secondsToMilliseconds(restored.expire),
+          );
+          const validatedTagTimestamps = tagMetadata.timestamps.map((tagTimestamps, index) => {
+            if (tagTimestamps !== null) return tagTimestamps;
+            const tag = tags[index];
+            if (
+              softTagsEnsured &&
+              tagMetadata.issues[index] === "tag-metadata-absent" &&
+              typeof tag === "string" &&
+              !explicitTags.has(tag) &&
+              tagMetadata.metadataFloor < restored.timestamp
+            ) {
+              return { expiredAt: 0, staleAt: 0 };
+            }
+            return null;
+          });
+          const tagFreshness = getCacheTagFreshness(
+            restored.timestamp,
+            now,
+            validatedTagTimestamps,
+          );
+
+          if (tagFreshness === "safety-miss") {
+            const safetyIssue = validatedTagTimestamps.flatMap((tagTimestamps, index) =>
+              tagTimestamps === null ? [tagMetadata.issues[index]] : [],
+            );
+            emitDiagnostic({
+              event: "safety-miss",
+              operation: "read",
+              reason: safetyIssue.includes("tag-metadata-incompatible")
                 ? "tag-metadata-incompatible"
                 : "tag-metadata-absent",
-          });
-          return entry;
+            });
+            reportRead("miss");
+            return entry;
+          }
+
+          if (tagFreshness !== "expired") {
+            const revalidate = tagFreshness === "stale" ? -1 : restored.revalidate;
+            entry = { ...restored, revalidate };
+          }
         }
-        const restored = decodeCacheEntry(stored);
-        if (!restored) {
-          await observeProspectiveSoftTags(cacheKey, softTags, now);
-          return entry;
-        }
-        if (getCacheEntryFreshness(restored, now) === "expired") {
-          await observeProspectiveSoftTags(cacheKey, softTags, now);
-          return entry;
-        }
-        const tags = uniq([...restored.tags, ...softTags]);
+        if (!entry) await observeProspectiveSoftTags(cacheKey, softTags, now);
+        reportRead(entry ? "hit" : "miss");
+        return entry;
+      } catch {
+        reportRead("source-fallback");
+        return entry;
+      }
+    },
+    async getExpiration(tags): Promise<number> {
+      try {
         const tagMetadata = await getTagMetadata(
           client,
           deploymentKeySpace,
           tags,
-          expectedGeneration,
+          await getMetadataGeneration(),
         );
-        const explicitTags = new Set(restored.tags);
-        const repairableSoftTags = tags.filter(
-          (tag, index) =>
-            tagMetadata.issues[index] === "tag-metadata-absent" &&
-            !explicitTags.has(tag) &&
-            tagMetadata.metadataFloor < restored.timestamp,
-        );
-        const softTagsEnsured = await ensureTagMetadata(
-          repairableSoftTags,
-          restored.timestamp,
-          restored.timestamp + secondsToMilliseconds(restored.expire),
-        );
-        const validatedTagTimestamps = tagMetadata.timestamps.map((tagTimestamps, index) => {
-          if (tagTimestamps !== null) return tagTimestamps;
-          const tag = tags[index];
-          if (
-            softTagsEnsured &&
-            tagMetadata.issues[index] === "tag-metadata-absent" &&
-            typeof tag === "string" &&
-            !explicitTags.has(tag) &&
-            tagMetadata.metadataFloor < restored.timestamp
-          ) {
-            return { expiredAt: 0, staleAt: 0 };
+        if (tagMetadata.issue !== null) {
+          if (tagMetadata.issue === "tag-metadata-incompatible" || tagMetadata.metadataFloor > 0) {
+            emitDiagnostic({
+              event: "safety-miss",
+              operation: "read",
+              reason: tagMetadata.issue,
+            });
+            return Number.POSITIVE_INFINITY;
           }
-          return null;
-        });
-        const tagFreshness = getCacheTagFreshness(restored.timestamp, now, validatedTagTimestamps);
-
-        if (tagFreshness === "safety-miss") {
-          const safetyIssue = validatedTagTimestamps.flatMap((tagTimestamps, index) =>
-            tagTimestamps === null ? [tagMetadata.issues[index]] : [],
-          );
-          emitDiagnostic({
-            event: "safety-miss",
-            operation: "read",
-            reason: safetyIssue.includes("tag-metadata-incompatible")
-              ? "tag-metadata-incompatible"
-              : "tag-metadata-absent",
-          });
-          return entry;
         }
-
-        if (tagFreshness !== "expired") {
-          const revalidate = tagFreshness === "stale" ? -1 : restored.revalidate;
-          entry = { ...restored, revalidate };
-        }
+        return Math.max(
+          0,
+          ...tagMetadata.timestamps
+            .map((timestamps) => timestamps?.expiredAt)
+            .filter((timestamp): timestamp is number => typeof timestamp === "number"),
+        );
+      } catch {
+        return Number.POSITIVE_INFINITY;
       }
-      if (!entry) await observeProspectiveSoftTags(cacheKey, softTags, now);
-      return entry;
-    },
-    async getExpiration(tags): Promise<number> {
-      const tagMetadata = await getTagMetadata(
-        client,
-        deploymentKeySpace,
-        tags,
-        await getMetadataGeneration(),
-      );
-      if (tagMetadata.issue !== null) {
-        if (tagMetadata.issue === "tag-metadata-incompatible" || tagMetadata.metadataFloor > 0) {
-          emitDiagnostic({
-            event: "safety-miss",
-            operation: "read",
-            reason: tagMetadata.issue,
-          });
-          return Number.POSITIVE_INFINITY;
-        }
-      }
-      return Math.max(
-        0,
-        ...tagMetadata.timestamps
-          .map((timestamps) => timestamps?.expiredAt)
-          .filter((timestamp): timestamp is number => typeof timestamp === "number"),
-      );
     },
     getResourceState(): RedisCacheResourceState {
       return { bufferedBytes, pendingWrites: pendingSets.size };
     },
     async refreshTags(): Promise<void> {
-      const result = await client.eval(
-        cleanupTagMetadataScript,
-        6,
-        ...redisTagMetadataKeys(deploymentKeySpace),
-        await getMetadataGeneration(),
-      );
-      if (result === TAG_METADATA_ABSENT_RESULT || result === TAG_METADATA_INCOMPATIBLE_RESULT) {
-        emitDiagnostic({
-          event: "safety-miss",
-          operation: "read",
-          reason:
-            result === TAG_METADATA_ABSENT_RESULT
-              ? "tag-metadata-absent"
-              : "tag-metadata-incompatible",
-        });
+      try {
+        const result = await client.eval(
+          cleanupTagMetadataScript,
+          6,
+          ...redisTagMetadataKeys(deploymentKeySpace),
+          await getMetadataGeneration(),
+        );
+        if (result === TAG_METADATA_ABSENT_RESULT || result === TAG_METADATA_INCOMPATIBLE_RESULT) {
+          emitDiagnostic({
+            event: "safety-miss",
+            operation: "read",
+            reason:
+              result === TAG_METADATA_ABSENT_RESULT
+                ? "tag-metadata-absent"
+                : "tag-metadata-incompatible",
+          });
+        }
+      } catch {
+        emitDiagnostic({ event: "tag-refresh-failure" });
       }
     },
     async set(cacheKey, pendingEntry): Promise<void> {
+      const pendingSet = { promise: Promise.resolve() };
       const write = (async (): Promise<void> => {
         const pendingTagsKey = redisPendingTagsKey(entryKeySpace, cacheKey);
-        const [prospectiveTags, expectedGeneration] = await Promise.all([
-          client.smembers(pendingTagsKey),
-          getMetadataGeneration(),
-        ]);
+        let prospectiveTags: string[];
+        let expectedGeneration: string;
+        try {
+          [prospectiveTags, expectedGeneration] = await Promise.all([
+            client.smembers(pendingTagsKey),
+            getMetadataGeneration(),
+          ]);
+        } catch {
+          emitDiagnostic({ event: "cache-write-failure" });
+          if (pendingSets.get(cacheKey) === pendingSet) pendingSets.delete(cacheKey);
+          await Promise.race([
+            pendingEntry.then(async (entry) => {
+              await Promise.allSettled([entry.value.cancel()]);
+              return null;
+            }),
+            new Promise<void>((resolve) => {
+              setTimeout(resolve, 0);
+            }),
+          ]);
+          return;
+        }
         const entry = await pendingEntry;
         const publicationTags = uniq([...entry.tags, ...prospectiveTags]);
         const serialized = await serializeEntry(entry);
         try {
-          const publication = await client.eval(
-            publishEntryScript,
-            9,
-            redisKey(entryKeySpace, cacheKey),
-            redisEntryGenerationKey(entryKeySpace, cacheKey),
-            ...redisTagMetadataKeys(deploymentKeySpace),
-            pendingTagsKey,
-            serialized.stored,
-            entry.timestamp,
-            nowInEpochMilliseconds(),
-            Math.max(1, Math.ceil(entry.expire)),
-            expectedGeneration,
-            publicationTags.length,
-            ...publicationTags,
-          );
+          let publication: unknown;
+          try {
+            publication = await client.eval(
+              publishEntryScript,
+              9,
+              redisKey(entryKeySpace, cacheKey),
+              redisEntryGenerationKey(entryKeySpace, cacheKey),
+              ...redisTagMetadataKeys(deploymentKeySpace),
+              pendingTagsKey,
+              serialized.stored,
+              entry.timestamp,
+              nowInEpochMilliseconds(),
+              Math.max(1, Math.ceil(entry.expire)),
+              expectedGeneration,
+              publicationTags.length,
+              ...publicationTags,
+            );
+          } catch {
+            emitDiagnostic({ event: "cache-write-failure" });
+            return;
+          }
           if (
             publication === TAG_METADATA_INCOMPATIBLE_RESULT ||
             publication === TAG_METADATA_ABSENT_RESULT
@@ -738,16 +817,22 @@ export function createRedisCacheHandler(
                   ? "tag-metadata-absent"
                   : "tag-metadata-incompatible",
             });
+          } else if (publication === 0 || publication === -1) {
+            emitDiagnostic({
+              event: "stale-write-rejected",
+              reason: publication === 0 ? "invalidation-fence" : "newer-entry",
+            });
           }
         } finally {
           serialized.release();
         }
       })();
-      pendingSets.set(cacheKey, write);
+      pendingSet.promise = write;
+      pendingSets.set(cacheKey, pendingSet);
       try {
         await write;
       } finally {
-        if (pendingSets.get(cacheKey) === write) {
+        if (pendingSets.get(cacheKey) === pendingSet) {
           pendingSets.delete(cacheKey);
         }
       }
@@ -756,22 +841,29 @@ export function createRedisCacheHandler(
       const uniqueTags = uniq(tags);
       if (uniqueTags.length === 0) return;
 
-      const now = nowInEpochMilliseconds();
-      const expiresAt =
-        typeof durations?.expire === "number" ? now + secondsToMilliseconds(durations.expire) : "";
-      const result = await client.eval(
-        updateTagsScript,
-        6,
-        ...redisTagMetadataKeys(deploymentKeySpace),
-        await getMetadataGeneration(),
-        now,
-        expiresAt,
-        durations ? 1 : 0,
-        uniqueTags.length,
-        ...uniqueTags,
-      );
-      if (result === TAG_METADATA_ABSENT_RESULT || result === TAG_METADATA_INCOMPATIBLE_RESULT) {
-        throw new Error("Redis tag metadata control changed during invalidation");
+      try {
+        const now = nowInEpochMilliseconds();
+        const expiresAt =
+          typeof durations?.expire === "number"
+            ? now + secondsToMilliseconds(durations.expire)
+            : "";
+        const result = await client.eval(
+          updateTagsScript,
+          6,
+          ...redisTagMetadataKeys(deploymentKeySpace),
+          await getMetadataGeneration(),
+          now,
+          expiresAt,
+          durations ? 1 : 0,
+          uniqueTags.length,
+          ...uniqueTags,
+        );
+        if (result === TAG_METADATA_ABSENT_RESULT || result === TAG_METADATA_INCOMPATIBLE_RESULT) {
+          throw new Error("Redis tag metadata control changed during invalidation");
+        }
+      } catch (error) {
+        emitDiagnostic({ event: "invalidation-failure" });
+        throw error;
       }
     },
   };

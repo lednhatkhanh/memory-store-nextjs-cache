@@ -53,6 +53,37 @@ describe("content service HTTP client", () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
+  it("distinguishes a confirmed missing document from source unavailability", async () => {
+    const missingFetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Promise.resolve(Response.json({ message: "missing" }, { status: 404 })),
+    );
+    const unavailableFetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Promise.resolve(Response.json({ message: "unavailable" }, { status: 503 })),
+    );
+    const dimensions = { locale: "en", site: "acme", slug: "welcome" };
+
+    await expect(
+      getPublishedDocument("http://content-service.test", dimensions, { fetch: missingFetch }),
+    ).rejects.toMatchObject({ code: "CONTENT_NOT_FOUND", statusCode: 404 });
+    await expect(
+      getPublishedDocument("http://content-service.test", dimensions, {
+        fetch: unavailableFetch,
+      }),
+    ).rejects.toMatchObject({ code: "CONTENT_UNAVAILABLE", statusCode: 503 });
+  });
+
+  it("bounds a slow source request with the configured timeout", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => new Promise<Response>(() => {}));
+
+    await expect(
+      getPublishedDocument(
+        "http://content-service.test",
+        { locale: "en", site: "acme", slug: "welcome" },
+        { fetch, timeout: 10 },
+      ),
+    ).rejects.toMatchObject({ code: "CONTENT_UNAVAILABLE" });
+  });
+
   it("rejects invalid public dimensions before making a source request", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>();
 

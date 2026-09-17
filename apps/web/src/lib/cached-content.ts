@@ -1,5 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
+import { notFound } from "next/navigation";
 
+import { referenceApplicationConfig } from "./application-config";
 import {
   getPublishedDocument,
   type PublicContentDimensions,
@@ -33,8 +35,16 @@ async function readPublishedDocument(
   cacheLife("publishedContent");
   cacheTag(getPublishedDocumentCacheTag(request));
 
-  return getPublishedDocument(
-    process.env["CONTENT_SERVICE_URL"] ?? defaultContentServiceUrl,
-    request,
-  );
+  try {
+    return await getPublishedDocument(
+      process.env["CONTENT_SERVICE_URL"] ?? defaultContentServiceUrl,
+      request,
+      { timeout: referenceApplicationConfig.contentServiceTimeoutMilliseconds },
+    );
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "CONTENT_NOT_FOUND") {
+      notFound();
+    }
+    throw error;
+  }
 }

@@ -160,9 +160,15 @@ async function waitForDiagnostic(
   result: "hit" | "miss",
   instances: ApplicationInstance[],
 ): Promise<void> {
-  const diagnostic = JSON.stringify({ cache: "remote", instance: instance.id, result });
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (instance.logs.join("").includes(diagnostic)) return;
+    const matched = instance.logs
+      .join("")
+      .split("\n")
+      .some(
+        (line) =>
+          line.includes(`"instance":"${instance.id}"`) && line.includes(`"result":"${result}"`),
+      );
+    if (matched) return;
     if (instance.process.exitCode !== null) break;
     await delay(50);
   }
@@ -414,6 +420,22 @@ describe("two production Next.js instances with shared Redis cache reuse", () =>
             site: "reference",
             slug: "rolling",
             title: "Rolling deployment revision 1",
+          },
+          {
+            body: "Content rendered while Redis is unavailable",
+            locale: "en",
+            revision: "outage-revision-1",
+            site: "reference",
+            slug: "outage",
+            title: "Redis outage fallback",
+          },
+          {
+            body: "Content with a controllable source failure",
+            locale: "en",
+            revision: "source-recovery-1",
+            site: "reference",
+            slug: "source-recovery",
+            title: "Source recovery",
           },
         ],
       },
@@ -757,5 +779,82 @@ describe("two production Next.js instances with shared Redis cache reuse", () =>
       applicationRuns,
     );
     await expectSourceReads(contentServiceUrl, applicationRuns, 4, "rolling");
+  }, 60_000);
+
+  it("degrades without a retry storm and recovers after Redis and source failures", async () => {
+    if (!applicationA) throw new Error("Applications did not start");
+    const application = applicationA;
+
+    await container.exec(["redis-cli", "client", "pause", "5000", "all"]);
+
+    const invalidationStartedAt = performance.now();
+    const failedInvalidation = await ky.post(`${application.url}/api/revalidate/content`, {
+      headers: { authorization: `Bearer ${applicationEnvironment.revalidationSecret}` },
+      json: { locale: "en", site: "reference", slug: "welcome" },
+      retry: 0,
+      throwHttpErrors: false,
+      timeout: 5_000,
+    });
+    expect(failedInvalidation.status).toBeGreaterThanOrEqual(500);
+    await expect(failedInvalidation.text()).resolves.not.toContain('"revalidated":true');
+    expect(performance.now() - invalidationStartedAt).toBeLessThan(5_000);
+
+    const fallbackResponses = await Promise.all(
+      Array.from({ length: 8 }, async () =>
+        getRenderedContent(application, applicationRuns, "/cache-demo/outage"),
+      ),
+    );
+    for (const rendered of fallbackResponses) {
+      expectRenderedRevision(rendered, "outage-revision-1", applicationRuns);
+    }
+    await expectSourceReads(contentServiceUrl, applicationRuns, 1, "outage");
+
+    await ky.put(`${contentServiceUrl}/__test/source-failures/reference/en/source-recovery`, {
+      retry: 0,
+    });
+    const unavailable = await ky.get(`${application.url}/cache-demo/source-recovery`, {
+      retry: 0,
+      throwHttpErrors: false,
+    });
+    const unavailableBody = await unavailable.text();
+    expect(unavailableBody).not.toContain("source-recovery-1");
+    expect(unavailableBody).not.toContain('<meta name="robots" content="noindex"/>');
+
+    const missing = await ky.get(`${application.url}/cache-demo/confirmed-missing`, {
+      retry: 0,
+      throwHttpErrors: false,
+    });
+    expect(await missing.text()).toContain('<meta name="robots" content="noindex"/>');
+
+    await ky.delete(`${contentServiceUrl}/__test/source-failures/reference/en/source-recovery`, {
+      retry: 0,
+    });
+    expectRenderedRevision(
+      await getRenderedContent(application, applicationRuns, "/cache-demo/source-recovery"),
+      "source-recovery-1",
+      applicationRuns,
+    );
+
+    try {
+      await vi.waitFor(
+        async () => {
+          await expect(
+            invalidatePublishedDocument(application, applicationEnvironment, { slug: "outage" }),
+          ).resolves.toEqual({ revalidated: true });
+        },
+        { interval: 100, timeout: 10_000 },
+      );
+    } catch (error) {
+      throw new Error(`Redis client did not recover:${formatApplicationLogs(applicationRuns)}`, {
+        cause: error,
+      });
+    }
+
+    expectRenderedRevision(
+      await getRenderedContent(application, applicationRuns, "/cache-demo/outage"),
+      "outage-revision-1",
+      applicationRuns,
+    );
+    await expectSourceReads(contentServiceUrl, applicationRuns, 2, "outage");
   }, 60_000);
 });

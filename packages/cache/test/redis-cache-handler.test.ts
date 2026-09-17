@@ -578,7 +578,7 @@ describe("Redis Cache Components handler", () => {
 
     await expect(handler.get("welcome-cache-key", [])).resolves.toBeUndefined();
     await expect(handler.get("ordinary-missing-key", [])).resolves.toBeUndefined();
-    expect(diagnostics).toEqual([
+    expect(diagnostics.filter((diagnostic) => diagnostic.event === "safety-miss")).toEqual([
       {
         event: "safety-miss",
         operation: "read",
@@ -611,7 +611,7 @@ describe("Redis Cache Components handler", () => {
     await redis.del(...tagMetadataKeys);
 
     await expect(handler.get("welcome-cache-key", [])).resolves.toBeUndefined();
-    expect(diagnostics).toEqual([
+    expect(diagnostics.filter((diagnostic) => diagnostic.event === "safety-miss")).toEqual([
       {
         event: "safety-miss",
         operation: "read",
@@ -924,7 +924,13 @@ describe("Redis Cache Components handler", () => {
     const invalidatingHandler = createRedisCacheHandler(redis, { namespace });
     const oldWriterRedis = redis.duplicate();
     const newWriterRedis = redis.duplicate();
-    const oldWriter = createRedisCacheHandler(oldWriterRedis, { namespace });
+    const diagnostics: RedisCacheDiagnostic[] = [];
+    const oldWriter = createRedisCacheHandler(oldWriterRedis, {
+      namespace,
+      onDiagnostic(diagnostic) {
+        diagnostics.push(diagnostic);
+      },
+    });
     const newWriter = createRedisCacheHandler(newWriterRedis, { namespace });
     const tag = "document:reference:en:welcome";
     const oldEntry = deferred<CacheEntry>();
@@ -955,6 +961,10 @@ describe("Redis Cache Components handler", () => {
 
       const restored = await invalidatingHandler.get("welcome-cache-key", []);
       await expect(new Response(restored?.value).text()).resolves.toBe("welcome-revision-2");
+      expect(diagnostics).toContainEqual({
+        event: "stale-write-rejected",
+        reason: "invalidation-fence",
+      });
     } finally {
       await Promise.all([oldWriterRedis.quit(), newWriterRedis.quit()]);
     }

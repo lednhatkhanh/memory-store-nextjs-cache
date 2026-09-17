@@ -6,8 +6,17 @@ type Environment = Readonly<Record<string, string | undefined>>;
 
 export type ReferenceApplicationConfig = Readonly<{
   content: Pick<PublicContentDimensions, "locale" | "site">;
+  contentServiceTimeoutMilliseconds: number;
   namespace: CacheNamespace;
 }>;
+
+function positiveInteger(environment: Environment, name: string, fallback: number): number {
+  const value = environment[name] === undefined ? fallback : Number(environment[name]);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive safe integer`);
+  }
+  return value;
+}
 
 export function getReferenceApplicationConfig(
   environment: Environment,
@@ -22,7 +31,15 @@ export function getReferenceApplicationConfig(
     site,
   });
 
-  return { content: validatePublicContentPartition({ locale, site }), namespace };
+  return {
+    content: validatePublicContentPartition({ locale, site }),
+    contentServiceTimeoutMilliseconds: positiveInteger(
+      environment,
+      "CONTENT_SERVICE_TIMEOUT_MILLISECONDS",
+      2_000,
+    ),
+    namespace,
+  };
 }
 
 export const referenceApplicationConfig = getReferenceApplicationConfig(process.env);

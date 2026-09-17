@@ -17,9 +17,9 @@ Six cache-package exceptions are explicit:
 - `rspack.config.ts` may default-export its configuration because that is Rspack's loader contract.
 - `src/next-handler.ts` may read the documented cache environment variables and default-export its
   handler because those are Next.js's runtime configuration and cache-handler loader contracts.
-  Its single `console.info` call emits the documented instance and cache-result diagnostic while
-  deliberately excluding cached content, namespaces, and raw cache keys. Its `console.warn` call
-  likewise emits only the bounded entry-rejection reason and byte counts.
+  Its `console.info` and `console.warn` calls emit only the documented fixed-shape cache and
+  connection diagnostics plus the bounded instance label, deliberately excluding cached content,
+  credentials, namespaces, tags, and raw cache keys.
 - The streamed-entry serialization loop awaits each read and any limit-triggered cancellation in
   sequence. Parallelizing either operation would violate Web Streams ordering or publish work before
   cancellation has settled, so the three local `no-await-in-loop` suppressions document that required

@@ -10,9 +10,11 @@ describe("reference application configuration", () => {
       REDIS_CACHE_NAMESPACE: "reference-app",
       REDIS_CACHE_RELEASE: "2026-09-17.2",
       REDIS_CACHE_SITE: "marketing",
+      CONTENT_SERVICE_TIMEOUT_MILLISECONDS: "750",
     });
 
     expect(config.content).toEqual({ locale: "fr-FR", site: "marketing" });
+    expect(config.contentServiceTimeoutMilliseconds).toBe(750);
     expect(config.namespace).toEqual({
       deployment: "c92a822b02120cd58d874fddbef9f714818eaa00a46d74386918ec7d49b77f8f",
       release: "38e0a4804bdd59dd8cee3b525d99cc1b1ec122a6709653c915afb82d2baa3fe8",
@@ -20,11 +22,20 @@ describe("reference application configuration", () => {
   });
 
   it("provides validated local-development defaults", () => {
-    expect(getReferenceApplicationConfig({}).content).toEqual({
-      locale: "en",
-      site: "reference",
+    expect(getReferenceApplicationConfig({})).toMatchObject({
+      content: { locale: "en", site: "reference" },
+      contentServiceTimeoutMilliseconds: 2_000,
     });
   });
+
+  it.each(["0", "-1", "1.5", "not-a-number"])(
+    "rejects an invalid content-service timeout of %s",
+    (timeout) => {
+      expect(() =>
+        getReferenceApplicationConfig({ CONTENT_SERVICE_TIMEOUT_MILLISECONDS: timeout }),
+      ).toThrow("CONTENT_SERVICE_TIMEOUT_MILLISECONDS must be a positive safe integer");
+    },
+  );
 
   it.each([
     ["REDIS_CACHE_ENVIRONMENT", "Production", "Invalid cache namespace"],

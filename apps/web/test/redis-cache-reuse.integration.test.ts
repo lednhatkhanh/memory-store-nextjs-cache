@@ -23,10 +23,14 @@ type ApplicationInstance = {
 };
 
 type ApplicationEnvironment = {
+  cacheEnvironment: string;
   contentServiceUrl: string;
+  locale: string;
   namespace: string;
+  release: string;
   revalidationSecret: string;
   redisUrl: string;
+  site: string;
 };
 
 async function getAvailablePort(): Promise<number> {
@@ -104,7 +108,11 @@ async function startApplication(
           ...process.env,
           CACHE_INSTANCE_ID: id,
           CONTENT_SERVICE_URL: environment.contentServiceUrl,
+          REDIS_CACHE_ENVIRONMENT: environment.cacheEnvironment,
+          REDIS_CACHE_LOCALE: environment.locale,
           REDIS_CACHE_NAMESPACE: environment.namespace,
+          REDIS_CACHE_RELEASE: environment.release,
+          REDIS_CACHE_SITE: environment.site,
           REDIS_URL: environment.redisUrl,
           REVALIDATION_SECRET: environment.revalidationSecret,
         },
@@ -399,16 +407,28 @@ describe("two production Next.js instances with shared Redis cache reuse", () =>
             slug: "path-bystander",
             title: "Bystander page revision 1",
           },
+          {
+            body: "Content served during a rolling deployment",
+            locale: "en",
+            revision: "rolling-revision-1",
+            site: "reference",
+            slug: "rolling",
+            title: "Rolling deployment revision 1",
+          },
         ],
       },
       retry: 0,
     });
 
     applicationEnvironment = {
+      cacheEnvironment: "test",
       contentServiceUrl,
-      namespace: `web-integration:${randomUUID()}`,
+      locale: "en",
+      namespace: `web-integration-${randomUUID()}`,
+      release: "release-1",
       revalidationSecret: `revalidation-test:${randomUUID()}`,
       redisUrl: `redis://${container.getHost()}:${container.getMappedPort(REDIS_PORT)}`,
+      site: "reference",
     };
     applicationA = await startTrackedApplication(
       "instance-a",
@@ -692,5 +712,50 @@ describe("two production Next.js instances with shared Redis cache reuse", () =>
     );
     expect(bystanderAfter).not.toContain("path-bystander-page-2");
     await expectSourceReads(contentServiceUrl, applicationRuns, 3, "path-bystander");
+  }, 60_000);
+
+  it("isolates entries while invalidating every release serving a rolling deployment", async () => {
+    if (!applicationA) throw new Error("Applications did not start");
+    const nextRelease = await startTrackedApplication(
+      "instance-release-2",
+      { ...applicationEnvironment, release: "release-2" },
+      applicationRuns,
+    );
+
+    expectRenderedRevision(
+      await getRenderedContent(applicationA, applicationRuns, "/cache-demo/rolling"),
+      "rolling-revision-1",
+      applicationRuns,
+    );
+    expectRenderedRevision(
+      await getRenderedContent(nextRelease, applicationRuns, "/cache-demo/rolling"),
+      "rolling-revision-1",
+      applicationRuns,
+    );
+    await expectSourceReads(contentServiceUrl, applicationRuns, 2, "rolling");
+
+    await ky.put(`${contentServiceUrl}/__test/documents/reference/en/rolling`, {
+      json: {
+        body: "Content invalidated across both releases",
+        revision: "rolling-revision-2",
+        title: "Rolling deployment revision 2",
+      },
+      retry: 0,
+    });
+    expect(
+      await invalidatePublishedDocument(nextRelease, applicationEnvironment, { slug: "rolling" }),
+    ).toEqual({ revalidated: true });
+
+    expectRenderedRevision(
+      await getRenderedContent(applicationA, applicationRuns, "/cache-demo/rolling"),
+      "rolling-revision-2",
+      applicationRuns,
+    );
+    expectRenderedRevision(
+      await getRenderedContent(nextRelease, applicationRuns, "/cache-demo/rolling"),
+      "rolling-revision-2",
+      applicationRuns,
+    );
+    await expectSourceReads(contentServiceUrl, applicationRuns, 4, "rolling");
   }, 60_000);
 });

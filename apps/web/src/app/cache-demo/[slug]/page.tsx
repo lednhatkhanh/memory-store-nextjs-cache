@@ -3,6 +3,7 @@ import { Suspense } from "react";
 
 import { Link } from "../../../components/link";
 import { MarkdownContent } from "../../../components/markdown-content";
+import { referenceApplicationConfig } from "../../../lib/application-config";
 import { getCachedPublishedDocument } from "../../../lib/cached-content";
 
 export const instant = true;
@@ -50,8 +51,7 @@ async function FreshRequestDetails({
   await io();
 
   const document = await getCachedPublishedDocument({
-    locale: "en",
-    site: "reference",
+    ...referenceApplicationConfig.content,
     slug,
   });
 

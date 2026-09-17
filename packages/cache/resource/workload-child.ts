@@ -37,6 +37,7 @@ type MeasurementCacheEntry = Readonly<{
   value: ReadableStream<Uint8Array>;
 }>;
 type MeasurementResourceState = Readonly<{ bufferedBytes: number; pendingWrites: number }>;
+type MeasurementCacheNamespace = Readonly<{ deployment: string; release: string }>;
 type MeasurementDiagnostic = Readonly<{
   event: "entry-rejected";
   limitBytes: number;
@@ -50,12 +51,19 @@ type MeasurementRedisCacheHandler = Readonly<{
   updateTags: (tags: string[], durations?: { expire?: number }) => Promise<void>;
 }>;
 type ProductionPackage = Readonly<{
+  createCacheNamespace: (input: {
+    application: string;
+    environment: string;
+    locale: string;
+    release: string;
+    site: string;
+  }) => MeasurementCacheNamespace;
   createRedisCacheHandler: (
     client: Redis,
     options: Readonly<{
       maxBufferedBytes: number;
       maxEntrySizeBytes: number;
-      namespace: string;
+      namespace: MeasurementCacheNamespace;
       onDiagnostic?: (diagnostic: MeasurementDiagnostic) => void;
     }>,
   ) => MeasurementRedisCacheHandler;
@@ -76,6 +84,7 @@ function isProductionPackage(value: unknown): value is ProductionPackage {
     typeof value === "object" &&
     value !== null &&
     typeof Reflect.get(value, "packageIdentity") === "string" &&
+    typeof Reflect.get(value, "createCacheNamespace") === "function" &&
     typeof Reflect.get(value, "createRedisCacheHandler") === "function"
   );
 }
@@ -1019,12 +1028,24 @@ async function runMeasurement(request: ResourceChildRequest): Promise<ResourceRu
   const handler = productionPackage.createRedisCacheHandler(redis, {
     maxBufferedBytes: request.workload.maxBufferedBytes,
     maxEntrySizeBytes: request.workload.maxEntrySizeBytes,
-    namespace: `resource-measurement:${request.workload.seed}`,
+    namespace: productionPackage.createCacheNamespace({
+      application: "resource-measurement",
+      environment: "test",
+      locale: "en",
+      release: `seed-${request.workload.seed}`,
+      site: "steady-state",
+    }),
   });
   const peakHandler = productionPackage.createRedisCacheHandler(redis, {
     maxBufferedBytes: request.workload.peakMaxBufferedBytes,
     maxEntrySizeBytes: request.workload.peakMaxEntrySizeBytes,
-    namespace: `resource-peak-measurement:${request.workload.seed}`,
+    namespace: productionPackage.createCacheNamespace({
+      application: "resource-measurement",
+      environment: "test",
+      locale: "en",
+      release: `seed-${request.workload.seed}`,
+      site: "peak",
+    }),
     onDiagnostic(diagnostic) {
       diagnostics.push(diagnostic);
     },

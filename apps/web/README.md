@@ -134,22 +134,34 @@ Set these environment variables when running the reference application:
 | Variable                           | Default                     | Purpose                                                                    |
 | ---------------------------------- | --------------------------- | -------------------------------------------------------------------------- |
 | `REDIS_URL`                        | `redis://127.0.0.1:6379`    | ioredis connection URL used by the package's default Next.js handler.      |
-| `REDIS_CACHE_NAMESPACE`            | `memory-store-nextjs-cache` | Prefix that isolates an environment's cache entries from other users.      |
+| `REDIS_CACHE_NAMESPACE`            | `memory-store-nextjs-cache` | Stable public application identity used in the cache deployment scope.     |
+| `REDIS_CACHE_ENVIRONMENT`          | `development`               | Deployment environment, such as `staging` or `production`.                 |
+| `REDIS_CACHE_RELEASE`              | `local`                     | Entry serialization and behavior release identifier.                       |
+| `REDIS_CACHE_SITE`                 | `reference`                 | Validated public site used by both cache namespace and content reads.      |
+| `REDIS_CACHE_LOCALE`               | `en`                        | Validated public locale used by both cache namespace and content reads.    |
 | `REDIS_CACHE_MAX_ENTRY_SIZE_BYTES` | `8388608`                   | Maximum metadata plus raw streamed bytes accepted for one cache entry.     |
 | `REDIS_CACHE_MAX_BUFFERED_BYTES`   | `33554432`                  | Maximum raw stream bytes buffered by one handler across concurrent writes. |
 | `CONTENT_SERVICE_URL`              | `http://127.0.0.1:3100`     | Base URL for the published-content source used by the reference route.     |
 | `CACHE_INSTANCE_ID`                | Current process ID          | Safe instance label included in cache hit/miss diagnostics.                |
 | `REVALIDATION_SECRET`              | None                        | Bearer secret required by the publication revalidation webhook.            |
 
-Production deployments should set an explicit, stable namespace for each environment. Tests always
-generate a unique namespace and never flush Redis. The executable scenario uses Testcontainers with
+The application owns these partitioning inputs at its environment boundary. Its configuration
+module validates all five values before rendering: the deployment system supplies application,
+environment, and release identity, while site and locale select the public content collection.
+Production deployments should set every value explicitly. The package hashes the validated inputs,
+so raw values do not appear in Redis keys; credentials, authorization values, visitor identifiers,
+and private content remain forbidden inputs. Tests always generate a unique application identity
+and never flush Redis. The executable scenario uses Testcontainers with
 the pinned `redis:8.2.1-alpine` image and starts two independent processes from one production build.
 Instance A warms `/cache-demo/welcome`; instance B and restarted replacements for both processes reuse
 the same Redis entry without another source read. Each process owns its own ioredis client. The handler
 logs structured `cache`, `instance`, and `result` fields for each lookup, without content, namespaces,
 or raw cache keys, so failures distinguish the serving process and a cache hit from a miss.
 
-Each cached published document carries a tag derived from its validated site, locale, and slug.
+Each cached published document receives validated site, locale, slug, and cache-role arguments, so
+every content dependency participates in the Next.js cache key. It also carries a tag derived from
+its validated site, locale, and slug. Credentials, raw visitor identifiers, preview state, and
+private content are absent from both cache arguments and tags.
 The cached function calls `cacheLife("publishedContent")`, whose checked-in profile makes content
 fresh on the server for one hour and hard-expires it after one day. During the fresh hour, either
 application instance can reuse the shared Redis entry without reading the source. After one hour,
@@ -249,6 +261,13 @@ and eventual shared reuse of its background-refreshed revision. Package tests us
 clock for exact fresh/stale/expired boundaries and real Redis time with bounded polling for both
 entry and delayed tag hard expiration. These package-level scenarios do not make freshness claims
 about unrelated HTTP, browser, source-replica, or CDN caches.
+
+The rolling-deployment scenario starts a second release with the same application, environment,
+site, and locale. Both releases miss and publish their own entry for the same content identifier,
+which proves release-specific entries cannot be interpreted across versions. Invalidation through
+the newer release updates their shared deployment-scoped tag state; subsequent requests through
+both releases reject revision 1 and render revision 2. This is shared invalidation rather than
+per-release webhook fan-out.
 
 ## When to split the app
 

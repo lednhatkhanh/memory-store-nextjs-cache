@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 
+import { referenceApplicationConfig } from "../../../lib/application-config";
 import { getCachedPublishedDocument } from "../../../lib/cached-content";
 
 export default function PathCacheDemoLayout({
@@ -23,7 +24,7 @@ async function RouteLayoutDependency({
 }) {
   const { slug } = await params;
   const document = await getCachedPublishedDocument(
-    { locale: "en", site: "reference", slug },
+    { ...referenceApplicationConfig.content, slug },
     "layout",
   );
 

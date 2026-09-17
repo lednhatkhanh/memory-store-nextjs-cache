@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 
-import { createRedisCacheHandler, type RedisCacheHandler } from "./index.ts";
+import { createCacheNamespace, createRedisCacheHandler, type RedisCacheHandler } from "./index.ts";
 
 const client = new Redis(process.env["REDIS_URL"] ?? "redis://127.0.0.1:6379", {
   lazyConnect: true,
@@ -18,7 +18,13 @@ const maxEntrySizeBytes = optionalByteLimit("REDIS_CACHE_MAX_ENTRY_SIZE_BYTES");
 const redisHandler = createRedisCacheHandler(client, {
   ...(maxBufferedBytes === null ? {} : { maxBufferedBytes }),
   ...(maxEntrySizeBytes === null ? {} : { maxEntrySizeBytes }),
-  namespace: process.env["REDIS_CACHE_NAMESPACE"] ?? "memory-store-nextjs-cache",
+  namespace: createCacheNamespace({
+    application: process.env["REDIS_CACHE_NAMESPACE"] ?? "memory-store-nextjs-cache",
+    environment: process.env["REDIS_CACHE_ENVIRONMENT"] ?? "development",
+    locale: process.env["REDIS_CACHE_LOCALE"] ?? "en",
+    release: process.env["REDIS_CACHE_RELEASE"] ?? "local",
+    site: process.env["REDIS_CACHE_SITE"] ?? "reference",
+  }),
   onDiagnostic(diagnostic) {
     // oxlint-disable-next-line no-console -- This runtime seam intentionally emits bounded diagnostics.
     console.warn(JSON.stringify({ cache: "remote", instance, ...diagnostic }));

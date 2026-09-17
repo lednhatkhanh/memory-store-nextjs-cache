@@ -1,5 +1,6 @@
 import { revalidateTag } from "next/cache";
 
+import { referenceApplicationConfig } from "../../../../lib/application-config";
 import { getPublishedDocumentCacheTag } from "../../../../lib/cached-content";
 import {
   type PublicContentDimensions,
@@ -47,6 +48,12 @@ export async function POST(request: Request): Promise<Response> {
     dimensions = validatePublicContentDimensions(body);
   } catch {
     return Response.json({ message: "Invalid content dimensions" }, { status: 400 });
+  }
+  if (
+    dimensions.site !== referenceApplicationConfig.content.site ||
+    dimensions.locale !== referenceApplicationConfig.content.locale
+  ) {
+    return Response.json({ message: "Content partition is not configured" }, { status: 400 });
   }
 
   revalidateTag(

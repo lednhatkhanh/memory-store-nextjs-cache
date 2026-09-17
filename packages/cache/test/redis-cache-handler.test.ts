@@ -7,7 +7,9 @@ import type { StartedTestContainer } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  createCacheNamespace,
   createRedisCacheHandler,
+  type CacheNamespace,
   type CacheEntry,
   type RedisCacheDiagnostic,
   getCacheEntryFreshness,
@@ -41,6 +43,16 @@ function cacheEntry({
     timestamp,
     value: streamFromText(revision),
   };
+}
+
+function testCacheNamespace(): CacheNamespace {
+  return createCacheNamespace({
+    application: `cache-handler-${randomUUID()}`,
+    environment: "test",
+    locale: "en",
+    release: "test-release",
+    site: "reference",
+  });
 }
 
 function deferred<T>(): {
@@ -168,7 +180,7 @@ describe("Redis Cache Components handler", () => {
 
   it("stores and retrieves a Cache Components entry through ioredis", async () => {
     const handler = createRedisCacheHandler(redis, {
-      namespace: `cache-handler-test:${randomUUID()}`,
+      namespace: testCacheNamespace(),
     });
     const original = cacheEntry({
       revision: "cached-render",
@@ -191,7 +203,7 @@ describe("Redis Cache Components handler", () => {
 
   it("serves a time-stale entry only until its hard-expiration boundary", async () => {
     const handler = createRedisCacheHandler(redis, {
-      namespace: `cache-handler-test:${randomUUID()}`,
+      namespace: testCacheNamespace(),
     });
     const original = {
       ...cacheEntry({
@@ -230,7 +242,7 @@ describe("Redis Cache Components handler", () => {
     "keeps the previous complete entry when a replacement stream %s",
     async (_state, reason) => {
       const handler = createRedisCacheHandler(redis, {
-        namespace: `cache-handler-test:${randomUUID()}`,
+        namespace: testCacheNamespace(),
       });
       const timestamp = Date.now();
       await handler.set(
@@ -268,7 +280,7 @@ describe("Redis Cache Components handler", () => {
   );
 
   it("publishes a streamed replacement only after the complete value is available", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const writer = createRedisCacheHandler(redis, { namespace });
     const observerRedis = redis.duplicate();
     const observer = createRedisCacheHandler(observerRedis, { namespace });
@@ -316,7 +328,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("rejects an oversized streamed entry without replacing the complete value", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const seedingHandler = createRedisCacheHandler(redis, { namespace });
     const diagnostics: RedisCacheDiagnostic[] = [];
     const boundedHandler = createRedisCacheHandler(redis, {
@@ -374,7 +386,7 @@ describe("Redis Cache Components handler", () => {
     const handler = createRedisCacheHandler(redis, {
       maxBufferedBytes: 6,
       maxEntrySizeBytes: 1_000,
-      namespace: `cache-handler-test:${randomUUID()}`,
+      namespace: testCacheNamespace(),
       onDiagnostic(diagnostic) {
         diagnostics.push(diagnostic);
       },
@@ -411,7 +423,7 @@ describe("Redis Cache Components handler", () => {
     const handler = createRedisCacheHandler(redis, {
       maxBufferedBytes: 6,
       maxEntrySizeBytes: 1_000,
-      namespace: `cache-handler-test:${randomUUID()}`,
+      namespace: testCacheNamespace(),
     });
     const rejected = controlledStream("1234567");
 
@@ -443,7 +455,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("invalidates matching tagged entries across handler instances", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const invalidatingHandler = createRedisCacheHandler(redis, { namespace });
     const servingRedis = redis.duplicate();
     const servingHandler = createRedisCacheHandler(servingRedis, { namespace });
@@ -483,9 +495,43 @@ describe("Redis Cache Components handler", () => {
     }
   }, 60_000);
 
+  it("isolates release entries while sharing invalidation across a rolling deployment", async () => {
+    const namespaceInput = {
+      application: `cache-handler-${randomUUID()}`,
+      environment: "test",
+      locale: "en",
+      site: "reference",
+    };
+    const oldRelease = createRedisCacheHandler(redis, {
+      namespace: createCacheNamespace({ ...namespaceInput, release: "release-1" }),
+    });
+    const newRelease = createRedisCacheHandler(redis, {
+      namespace: createCacheNamespace({ ...namespaceInput, release: "release-2" }),
+    });
+    const timestamp = performance.timeOrigin + performance.now();
+    const tag = "document:reference:en:welcome";
+
+    await oldRelease.set(
+      "same-cache-key",
+      Promise.resolve(cacheEntry({ revision: "old-serialization", tags: [tag], timestamp })),
+    );
+    await expect(newRelease.get("same-cache-key", [])).resolves.toBeUndefined();
+
+    await newRelease.set(
+      "same-cache-key",
+      Promise.resolve(
+        cacheEntry({ revision: "new-serialization", tags: [tag], timestamp: timestamp + 1 }),
+      ),
+    );
+    await newRelease.updateTags([tag], { expire: 0 });
+
+    await expect(oldRelease.get("same-cache-key", [])).resolves.toBeUndefined();
+    await expect(newRelease.get("same-cache-key", [])).resolves.toBeUndefined();
+  }, 60_000);
+
   it("retains a prospective implicit soft tag through an unrelated invalidation", async () => {
     const handler = createRedisCacheHandler(redis, {
-      namespace: `cache-handler-test:${randomUUID()}`,
+      namespace: testCacheNamespace(),
     });
     const timestamp = performance.timeOrigin + performance.now();
     const softTag = "_N_T_/cache-demo/welcome";
@@ -508,7 +554,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("reports a safety miss when a surviving entry loses its tag metadata", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const diagnostics: RedisCacheDiagnostic[] = [];
     const handler = createRedisCacheHandler(redis, {
       namespace,
@@ -526,7 +572,7 @@ describe("Redis Cache Components handler", () => {
         }),
       ),
     );
-    const tagMetadataKeys = await scanKeys(redis, `*:${namespace}:tag:*`);
+    const tagMetadataKeys = await scanKeys(redis, `*${namespace.deployment}:tag:*`);
     expect(tagMetadataKeys.length).toBeGreaterThan(0);
     await redis.del(...tagMetadataKeys);
 
@@ -542,7 +588,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("reports incompatible partial tag metadata separately from absent metadata", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const diagnostics: RedisCacheDiagnostic[] = [];
     const handler = createRedisCacheHandler(redis, {
       namespace,
@@ -560,7 +606,7 @@ describe("Redis Cache Components handler", () => {
         }),
       ),
     );
-    const tagMetadataKeys = await scanKeys(redis, `*:${namespace}:tag:updated`);
+    const tagMetadataKeys = await scanKeys(redis, `*${namespace.deployment}:tag:updated`);
     expect(tagMetadataKeys).toHaveLength(1);
     await redis.del(...tagMetadataKeys);
 
@@ -575,7 +621,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("does not leave partial metadata when publication encounters an incompatible tag", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const handler = createRedisCacheHandler(redis, { namespace });
     const incompatibleTag = "document:reference:en:incompatible";
     const newTag = "document:reference:en:new";
@@ -589,7 +635,7 @@ describe("Redis Cache Components handler", () => {
         }),
       ),
     );
-    const updatedKeys = await scanKeys(redis, `*:${namespace}:tag:updated`);
+    const updatedKeys = await scanKeys(redis, `*${namespace.deployment}:tag:updated`);
     await redis.del(...updatedKeys);
 
     await handler.set(
@@ -603,14 +649,14 @@ describe("Redis Cache Components handler", () => {
       ),
     );
 
-    const metadataKeys = await scanKeys(redis, `*:${namespace}:tag:*`);
+    const metadataKeys = await scanKeys(redis, `*${namespace.deployment}:tag:*`);
     await expect(
       Promise.all(metadataKeys.map(async (key) => redis.zscore(key, newTag))),
     ).resolves.toEqual(metadataKeys.map(() => null));
   }, 60_000);
 
   it("captures prospective soft tags before awaiting a long render", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const handler = createRedisCacheHandler(redis, { namespace });
     const invalidatorRedis = redis.duplicate();
     const invalidator = createRedisCacheHandler(invalidatorRedis, { namespace });
@@ -621,7 +667,7 @@ describe("Redis Cache Components handler", () => {
     try {
       await expect(handler.get("welcome-cache-key", [softTag])).resolves.toBeUndefined();
       const write = handler.set("welcome-cache-key", pendingEntry.promise);
-      const pendingTagKeys = await scanKeys(redis, `*:${namespace}:pending-tags:*`);
+      const pendingTagKeys = await scanKeys(redis, `*${namespace.release}:pending-tags:*`);
       await redis.del(...pendingTagKeys);
       await invalidator.updateTags([softTag], { expire: 0 });
       pendingEntry.resolve(
@@ -636,7 +682,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("rejects an obsolete completion when tag metadata disappears after invalidation", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const diagnostics: RedisCacheDiagnostic[] = [];
     const writer = createRedisCacheHandler(redis, {
       namespace,
@@ -659,7 +705,7 @@ describe("Redis Cache Components handler", () => {
       );
       const obsoleteWrite = writer.set("welcome-cache-key", obsoleteEntry.promise);
       await invalidator.updateTags([tag], { expire: 0 });
-      const tagMetadataKeys = await scanKeys(redis, `*:${namespace}:tag:*`);
+      const tagMetadataKeys = await scanKeys(redis, `*${namespace.deployment}:tag:*`);
       await redis.del(...tagMetadataKeys);
       await expect(writer.getExpiration([tag])).resolves.toBe(Number.POSITIVE_INFINITY);
       obsoleteEntry.resolve(
@@ -679,7 +725,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("rejects an old generation after all metadata control state disappears", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const diagnostics: RedisCacheDiagnostic[] = [];
     const writer = createRedisCacheHandler(redis, {
       namespace,
@@ -702,8 +748,8 @@ describe("Redis Cache Components handler", () => {
       );
       const obsoleteWrite = writer.set("welcome-cache-key", obsoleteEntry.promise);
       await invalidator.updateTags([tag], { expire: 0 });
-      const metadataKeys = await scanKeys(redis, `*:${namespace}:tag:*`);
-      const controlKeys = await scanKeys(redis, `*:${namespace}:metadata-*`);
+      const metadataKeys = await scanKeys(redis, `*${namespace.deployment}:tag:*`);
+      const controlKeys = await scanKeys(redis, `*${namespace.deployment}:metadata-*`);
       await redis.del(...metadataKeys, ...controlKeys);
 
       const recoveredDiagnostics: RedisCacheDiagnostic[] = [];
@@ -736,7 +782,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("cleans tag metadata only after associated entries can no longer survive", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const handler = createRedisCacheHandler(redis, { namespace });
     const timestamp = performance.timeOrigin + performance.now();
     await handler.set(
@@ -752,7 +798,7 @@ describe("Redis Cache Components handler", () => {
     );
 
     await handler.refreshTags();
-    expect((await scanKeys(redis, `*:${namespace}:tag:*`)).length).toBe(4);
+    expect((await scanKeys(redis, `*${namespace.deployment}:tag:*`)).length).toBe(4);
     await expect(
       new Response((await handler.get("welcome-cache-key", []))?.value).text(),
     ).resolves.toBe("welcome-revision-1");
@@ -761,18 +807,18 @@ describe("Redis Cache Components handler", () => {
       pollUntil(
         async () => {
           await handler.refreshTags();
-          return scanKeys(redis, `*:${namespace}:tag:*`);
+          return scanKeys(redis, `*${namespace.deployment}:tag:*`);
         },
         (keys) => keys.length === 0,
         1_500,
       ),
     ).resolves.toEqual([]);
-    await expect(scanKeys(redis, `*:${namespace}:entry:*`)).resolves.toEqual([]);
+    await expect(scanKeys(redis, `*${namespace.release}:entry:*`)).resolves.toEqual([]);
     await expect(handler.get("welcome-cache-key", [])).resolves.toBeUndefined();
   }, 60_000);
 
   it("accepts a fresh completion before a deferred expiration deadline", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const handler = createRedisCacheHandler(redis, { namespace });
     const tag = "document:reference:en:welcome";
 
@@ -794,7 +840,7 @@ describe("Redis Cache Components handler", () => {
 
   it("returns a future delayed expiration through the handler contract", async () => {
     const handler = createRedisCacheHandler(redis, {
-      namespace: `cache-handler-test:${randomUUID()}`,
+      namespace: testCacheNamespace(),
     });
     const beforeUpdate = performance.timeOrigin + performance.now();
 
@@ -806,7 +852,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("lets a newer expire-now update replace an older deferred expiration", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const invalidatingHandler = createRedisCacheHandler(redis, { namespace });
     const servingRedis = redis.duplicate();
     const servingHandler = createRedisCacheHandler(servingRedis, { namespace });
@@ -837,7 +883,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("serves a tag-stale entry only within a delayed expiration policy", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const invalidatingHandler = createRedisCacheHandler(redis, { namespace });
     const servingRedis = redis.duplicate();
     const servingHandler = createRedisCacheHandler(servingRedis, { namespace });
@@ -874,7 +920,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("rejects a completion whose render started before invalidation", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const invalidatingHandler = createRedisCacheHandler(redis, { namespace });
     const oldWriterRedis = redis.duplicate();
     const newWriterRedis = redis.duplicate();
@@ -915,7 +961,7 @@ describe("Redis Cache Components handler", () => {
   }, 60_000);
 
   it("does not let an older overlapping completion replace a newer entry", async () => {
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const oldWriterRedis = redis.duplicate();
     const newWriterRedis = redis.duplicate();
     const oldWriter = createRedisCacheHandler(oldWriterRedis, { namespace });
@@ -963,7 +1009,7 @@ describe("Redis Cache Components handler", () => {
   it("preserves the newest valid revision across seeded operation orderings", async () => {
     const seed = 0x5a17e;
     const random = seededRandom(seed);
-    const namespace = `cache-handler-test:${randomUUID()}`;
+    const namespace = testCacheNamespace();
     const writerRedis = redis.duplicate();
     const readerRedis = redis.duplicate();
     const writer = createRedisCacheHandler(writerRedis, { namespace });

@@ -5,6 +5,7 @@ import { Suspense } from "react";
 import { Button } from "../../../components/button";
 import { Link } from "../../../components/link";
 import { MarkdownContent } from "../../../components/markdown-content";
+import { referenceApplicationConfig } from "../../../lib/application-config";
 import { getCachedPublishedDocument } from "../../../lib/cached-content";
 import { revalidatePathCacheDemo } from "./actions";
 
@@ -15,7 +16,7 @@ export async function generateMetadata({
 }: PageProps<"/path-cache-demo/[slug]">): Promise<Metadata> {
   const { slug } = await params;
   const document = await getCachedPublishedDocument(
-    { locale: "en", site: "reference", slug },
+    { ...referenceApplicationConfig.content, slug },
     "metadata",
   );
 
@@ -66,7 +67,7 @@ async function PageDependency({
   const { slug } = await params;
   await io();
   const document = await getCachedPublishedDocument(
-    { locale: "en", site: "reference", slug },
+    { ...referenceApplicationConfig.content, slug },
     "page",
   );
 

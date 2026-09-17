@@ -1,4 +1,37 @@
-# Cache package resource measurement
+# Redis Cache Components handler
+
+Create every handler namespace from explicit public deployment dimensions:
+
+```ts
+import { createCacheNamespace, createRedisCacheHandler } from "unicorn-nextjs-memory-cache";
+
+const handler = createRedisCacheHandler(redis, {
+  namespace: createCacheNamespace({
+    application: "storefront",
+    environment: "production",
+    locale: "en-US",
+    release: "2026-09-17.2",
+    site: "main",
+  }),
+});
+```
+
+`application`, `environment`, `site`, and `locale` form the deployment scope. Processes with the
+same five inputs intentionally share entries and durable invalidation state. `release` identifies
+the cache-entry serialization and behavior contract: different releases never read one another's
+entries, but they share tag invalidation within the same deployment scope so a publication event
+reaches every release still serving a rolling deployment.
+
+All inputs are validated and reduced to deterministic SHA-256 identifiers before Redis keys are
+constructed. Supply stable, public identifiers only. Never put credentials, authorization values,
+visitor identifiers, or private content in namespace inputs, cache arguments, or tags.
+
+The packaged `next-handler` maps `REDIS_CACHE_NAMESPACE`, `REDIS_CACHE_ENVIRONMENT`,
+`REDIS_CACHE_RELEASE`, `REDIS_CACHE_SITE`, and `REDIS_CACHE_LOCALE` to this contract. Its local
+defaults are for development; deployments should set every value explicitly and change the release
+identifier whenever cached serialization or interpretation becomes incompatible.
+
+## Resource measurement
 
 Run the isolated resource harness from the workspace root:
 

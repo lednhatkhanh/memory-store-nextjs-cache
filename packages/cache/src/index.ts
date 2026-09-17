@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { secondsToMilliseconds } from "date-fns/secondsToMilliseconds";
 import { uniq } from "es-toolkit";
@@ -6,6 +6,13 @@ import type { Redis } from "ioredis";
 
 import { decodeCacheEntry, encodeCacheEntry, type CacheEntry } from "./cache-entry-codec.ts";
 import { getCacheEntryFreshness, getCacheTagFreshness } from "./cache-entry-lifetime.ts";
+import type { CacheNamespace } from "./cache-namespace.ts";
+
+export {
+  createCacheNamespace,
+  type CacheNamespace,
+  type CacheNamespaceInput,
+} from "./cache-namespace.ts";
 
 export {
   getCacheEntryFreshness,
@@ -50,7 +57,7 @@ export type RedisCacheDiagnostic =
 export type RedisCacheHandlerOptions = {
   maxBufferedBytes?: number;
   maxEntrySizeBytes?: number;
-  namespace: string;
+  namespace: CacheNamespace;
   onDiagnostic?: (diagnostic: RedisCacheDiagnostic) => void;
 };
 
@@ -273,9 +280,12 @@ end
 return 1
 `;
 
-function redisKeySpace(namespace: string): string {
-  const namespaceDigest = createHash("sha256").update(namespace).digest("hex").slice(0, 16);
-  return `{memory-store:${namespaceDigest}}:${namespace}`;
+function redisDeploymentKeySpace(namespace: CacheNamespace): string {
+  return `{memory-store:${namespace.deployment}}:deployment:${namespace.deployment}`;
+}
+
+function redisEntryKeySpace(deploymentKeySpace: string, namespace: CacheNamespace): string {
+  return `${deploymentKeySpace}:release:${namespace.release}`;
 }
 
 function redisKey(keySpace: string, cacheKey: string): string {
@@ -387,11 +397,15 @@ export function createRedisCacheHandler(
   client: Redis,
   options: RedisCacheHandlerOptions,
 ): RedisCacheHandler {
-  if (options.namespace.trim().length === 0) {
-    throw new Error("Redis cache namespace must not be empty");
+  if (
+    !/^[a-f\d]{64}$/u.test(options.namespace.deployment) ||
+    !/^[a-f\d]{64}$/u.test(options.namespace.release)
+  ) {
+    throw new Error("Redis cache namespace must be created with createCacheNamespace");
   }
 
-  const keySpace = redisKeySpace(options.namespace);
+  const deploymentKeySpace = redisDeploymentKeySpace(options.namespace);
+  const entryKeySpace = redisEntryKeySpace(deploymentKeySpace, options.namespace);
   const maxEntrySizeBytes = configuredByteLimit(
     options.maxEntrySizeBytes,
     DEFAULT_MAX_ENTRY_SIZE_BYTES,
@@ -411,8 +425,8 @@ export function createRedisCacheHandler(
       .eval(
         initializeMetadataControlScript,
         2,
-        redisMetadataGenerationKey(keySpace),
-        redisMetadataFloorKey(keySpace),
+        redisMetadataGenerationKey(deploymentKeySpace),
+        redisMetadataFloorKey(deploymentKeySpace),
         randomUUID(),
       )
       .then((generation) => {
@@ -442,7 +456,7 @@ export function createRedisCacheHandler(
     const result = await client.eval(
       ensureTagMetadataScript,
       6,
-      ...redisTagMetadataKeys(keySpace),
+      ...redisTagMetadataKeys(deploymentKeySpace),
       expectedGeneration,
       fenceTimestamp,
       retainedUntil,
@@ -471,8 +485,8 @@ export function createRedisCacheHandler(
     if (tags.length === 0) return;
     await client
       .multi()
-      .sadd(redisPendingTagsKey(keySpace, cacheKey), ...tags)
-      .pexpire(redisPendingTagsKey(keySpace, cacheKey), PENDING_TAG_RETENTION_MILLISECONDS)
+      .sadd(redisPendingTagsKey(entryKeySpace, cacheKey), ...tags)
+      .pexpire(redisPendingTagsKey(entryKeySpace, cacheKey), PENDING_TAG_RETENTION_MILLISECONDS)
       .exec();
   };
 
@@ -561,8 +575,8 @@ export function createRedisCacheHandler(
       }
       const expectedGeneration = await getMetadataGeneration();
       const [stored, storedGeneration] = await client.mget(
-        redisKey(keySpace, cacheKey),
-        redisEntryGenerationKey(keySpace, cacheKey),
+        redisKey(entryKeySpace, cacheKey),
+        redisEntryGenerationKey(entryKeySpace, cacheKey),
       );
       let entry: CacheEntry | undefined;
       const now = nowInEpochMilliseconds();
@@ -588,7 +602,12 @@ export function createRedisCacheHandler(
           return entry;
         }
         const tags = uniq([...restored.tags, ...softTags]);
-        const tagMetadata = await getTagMetadata(client, keySpace, tags, expectedGeneration);
+        const tagMetadata = await getTagMetadata(
+          client,
+          deploymentKeySpace,
+          tags,
+          expectedGeneration,
+        );
         const explicitTags = new Set(restored.tags);
         const repairableSoftTags = tags.filter(
           (tag, index) =>
@@ -642,7 +661,7 @@ export function createRedisCacheHandler(
     async getExpiration(tags): Promise<number> {
       const tagMetadata = await getTagMetadata(
         client,
-        keySpace,
+        deploymentKeySpace,
         tags,
         await getMetadataGeneration(),
       );
@@ -670,7 +689,7 @@ export function createRedisCacheHandler(
       const result = await client.eval(
         cleanupTagMetadataScript,
         6,
-        ...redisTagMetadataKeys(keySpace),
+        ...redisTagMetadataKeys(deploymentKeySpace),
         await getMetadataGeneration(),
       );
       if (result === TAG_METADATA_ABSENT_RESULT || result === TAG_METADATA_INCOMPATIBLE_RESULT) {
@@ -686,7 +705,7 @@ export function createRedisCacheHandler(
     },
     async set(cacheKey, pendingEntry): Promise<void> {
       const write = (async (): Promise<void> => {
-        const pendingTagsKey = redisPendingTagsKey(keySpace, cacheKey);
+        const pendingTagsKey = redisPendingTagsKey(entryKeySpace, cacheKey);
         const [prospectiveTags, expectedGeneration] = await Promise.all([
           client.smembers(pendingTagsKey),
           getMetadataGeneration(),
@@ -698,9 +717,9 @@ export function createRedisCacheHandler(
           const publication = await client.eval(
             publishEntryScript,
             9,
-            redisKey(keySpace, cacheKey),
-            redisEntryGenerationKey(keySpace, cacheKey),
-            ...redisTagMetadataKeys(keySpace),
+            redisKey(entryKeySpace, cacheKey),
+            redisEntryGenerationKey(entryKeySpace, cacheKey),
+            ...redisTagMetadataKeys(deploymentKeySpace),
             pendingTagsKey,
             serialized.stored,
             entry.timestamp,
@@ -746,7 +765,7 @@ export function createRedisCacheHandler(
       const result = await client.eval(
         updateTagsScript,
         6,
-        ...redisTagMetadataKeys(keySpace),
+        ...redisTagMetadataKeys(deploymentKeySpace),
         await getMetadataGeneration(),
         now,
         expiresAt,

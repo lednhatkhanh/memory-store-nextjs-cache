@@ -68,4 +68,84 @@ describe("Cache Components entry freshness", () => {
       getCacheTagFreshness(entryTimestamp, now, [{ expiredAt: now, staleAt: entryTimestamp + 1 }]),
     ).toBe("expired");
   }, 1_000);
+
+  it("treats missing tag metadata as a safety miss", () => {
+    expect(getCacheTagFreshness(20 * SECOND, 30 * SECOND, [null])).toBe("safety-miss");
+  }, 1_000);
+
+  it("preserves the safety invariant across seeded lifetime and invalidation orderings", () => {
+    const seed = 0x10_5afe;
+    const modulus = 4_294_967_296;
+    let randomState = seed;
+    const random = (): number => {
+      randomState = (Math.imul(randomState, 1_664_525) + 1_013_904_223 + modulus) % modulus;
+      return randomState / modulus;
+    };
+    let clock = 1;
+    let entryTimestamp: number | null = 1;
+    let tagMetadataState: { expiredAt: number | null; staleAt: number | null } | null = {
+      expiredAt: 0,
+      staleAt: 0,
+    };
+    let metadataFloor = 0;
+    let pendingTimestamp: number | null = null;
+    const trace: string[] = [];
+
+    const read = (): void => {
+      if (entryTimestamp === null) return;
+      const freshness = getCacheTagFreshness(entryTimestamp, clock, [tagMetadataState]);
+      const expected =
+        tagMetadataState === null
+          ? "safety-miss"
+          : tagMetadataState.expiredAt !== null &&
+              tagMetadataState.expiredAt <= clock &&
+              tagMetadataState.expiredAt > entryTimestamp
+            ? "expired"
+            : tagMetadataState.staleAt !== null && tagMetadataState.staleAt > entryTimestamp
+              ? "stale"
+              : "fresh";
+      expect(freshness).toBe(expected);
+      trace.push(`read=${freshness} at ${clock}`);
+    };
+
+    const runOperation = (choice: number): void => {
+      clock += 1;
+      if (choice === 0) {
+        read();
+      } else if (choice === 1) {
+        pendingTimestamp = clock;
+        trace.push(`start write at ${clock}`);
+      } else if (choice === 2) {
+        tagMetadataState = { expiredAt: clock, staleAt: clock };
+        metadataFloor = clock;
+        trace.push(`invalidate at ${clock}`);
+      } else if (choice === 3) {
+        tagMetadataState = null;
+        trace.push(`metadata disappears at ${clock}`);
+      } else if (pendingTimestamp !== null) {
+        if (pendingTimestamp > metadataFloor) {
+          entryTimestamp = pendingTimestamp;
+          tagMetadataState ??= { expiredAt: 0, staleAt: 0 };
+        }
+        trace.push(`complete write from ${pendingTimestamp} at ${clock}`);
+        pendingTimestamp = null;
+      }
+    };
+
+    try {
+      runOperation(0);
+      runOperation(1);
+      runOperation(2);
+      runOperation(3);
+      runOperation(4);
+      runOperation(0);
+      for (let index = 0; index < 100; index += 1) {
+        runOperation(Math.floor(random() * 5));
+      }
+    } catch (error) {
+      throw new Error(`Tag lifetime model failed (seed=${seed}):\n${trace.join("\n")}`, {
+        cause: error,
+      });
+    }
+  }, 1_000);
 });

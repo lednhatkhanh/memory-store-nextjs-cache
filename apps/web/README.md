@@ -77,6 +77,49 @@ path-revalidation example adds one closed `page` / `layout` / `metadata` cache-r
 so each framework consumer has an independently observable cache entry; the role does not change
 the source document identity or enter the content-service URL.
 
+### Tag-metadata lifetime and safety
+
+Tag metadata follows the lifetime of the entries whose validity depends on it. Every published
+explicit tag has a complete four-part Redis record: stale time, hard-expiration time, last-update
+time, and a retained-until horizon. Zero is stored explicitly when no invalidation has occurred, so
+an absent member is distinguishable from a tag that has never been invalidated. Publication extends
+the retained-until horizon through the Redis lifetime of the longest surviving associated entry;
+tag updates extend it through both existing entry lifetimes and any delayed-expiration deadline.
+Implicit soft tags first receive a 60-second prospective lease when `get()` observes a cache miss.
+The pending tag set shares the namespace's Redis Cluster slot and expires with the same lease. A
+successful publication atomically fences against those tags, extends their metadata through the
+entry's hard lifetime, and removes the pending set. A render that outlives the prospective lease can
+still complete for its caller, but cleanup advances the safety floor and prevents that old render
+from becoming reusable.
+
+Next.js calls `refreshTags()` before requests. The handler uses that hook to atomically remove all
+four records whose retention horizons have elapsed. The same operation first advances a compact
+namespace safety floor. That floor is also advanced by every invalidation and is never removed by
+metadata cleanup. Consequently, metadata storage is bounded by tags needed by surviving entries,
+future delayed-expiration policies, at most 60 seconds of prospective soft-tag observations, and
+work accumulated since the last request-time cleanup; it does not grow forever with expired
+entries. This bound assumes the documented `refreshTags()` hook continues to run and the small
+safety-floor key is persisted with the cache namespace.
+
+A complete missing tag record on a surviving entry is a safety miss, while a partially present
+record is an incompatible-metadata safety miss. Neither is interpreted as a never-invalidated tag.
+For soft tags, `getExpiration()` returns `Infinity` after a namespace has a safety floor when state
+is absent or incompatible, causing the pinned Next.js handler contract to pass those tags to
+`get()` for the same fail-safe check. A never-invalidated soft tag is neutral only when it was
+observed before the relevant entry render or the entry is strictly newer than the safety floor. A
+publication may initialize a genuinely new complete record only when its render timestamp is
+strictly newer than the safety floor; this prevents metadata loss between a read and a later write
+from admitting a pre-invalidation render. Cleanup and publication are namespace-slot-local Lua
+operations, so horizon checks, floor advancement, removal, fencing, and writes are atomic on the
+verified Redis primary topology.
+
+Ordinary misses retain the existing `result: "miss"` request diagnostic. Safety misses additionally
+emit a bounded `event: "safety-miss"` warning with `operation: "read" | "write"` and either
+`tag-metadata-absent` or `tag-metadata-incompatible`; it contains no namespace, tag, cache key, or
+content. Redis eviction must not selectively evict metadata or the safety-floor key while retaining
+entries. If storage nevertheless loses tag records, the rules above fail closed; recovery from a
+restored or partially lost Redis dataset remains a separate operational scenario.
+
 Set these environment variables when running the reference application:
 
 | Variable                           | Default                     | Purpose                                                                    |

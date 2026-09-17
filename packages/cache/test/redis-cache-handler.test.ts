@@ -120,6 +120,18 @@ async function pollUntil<T>(
   return poll();
 }
 
+async function scanKeys(client: Redis, pattern: string): Promise<string[]> {
+  const keys: string[] = [];
+  let cursor = "0";
+  do {
+    // oxlint-disable-next-line no-await-in-loop -- Redis SCAN pagination is sequential.
+    const [nextCursor, page] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100);
+    cursor = nextCursor;
+    keys.push(...page);
+  } while (cursor !== "0");
+  return keys;
+}
+
 describe("Redis Cache Components handler", () => {
   let container: StartedTestContainer;
   let redis: Redis;
@@ -472,6 +484,175 @@ describe("Redis Cache Components handler", () => {
     } finally {
       await servingRedis.quit();
     }
+  }, 60_000);
+
+  it("retains a prospective implicit soft tag through an unrelated invalidation", async () => {
+    const handler = createRedisCacheHandler(redis, {
+      namespace: `cache-handler-test:${randomUUID()}`,
+    });
+    const timestamp = performance.timeOrigin + performance.now();
+    const softTag = "_N_T_/cache-demo/welcome";
+    await expect(handler.get("welcome-cache-key", [softTag])).resolves.toBeUndefined();
+    await handler.set(
+      "welcome-cache-key",
+      Promise.resolve(
+        cacheEntry({
+          revision: "welcome-revision-1",
+          tags: ["document:reference:en:welcome"],
+          timestamp,
+        }),
+      ),
+    );
+    await handler.updateTags(["document:reference:en:unrelated"], { expire: 0 });
+    await handler.refreshTags();
+
+    const restored = await handler.get("welcome-cache-key", [softTag]);
+    await expect(new Response(restored?.value).text()).resolves.toBe("welcome-revision-1");
+  }, 60_000);
+
+  it("reports a safety miss when a surviving entry loses its tag metadata", async () => {
+    const namespace = `cache-handler-test:${randomUUID()}`;
+    const diagnostics: RedisCacheDiagnostic[] = [];
+    const handler = createRedisCacheHandler(redis, {
+      namespace,
+      onDiagnostic(diagnostic) {
+        diagnostics.push(diagnostic);
+      },
+    });
+    await handler.set(
+      "welcome-cache-key",
+      Promise.resolve(
+        cacheEntry({
+          revision: "welcome-revision-1",
+          tags: ["document:reference:en:welcome"],
+          timestamp: performance.timeOrigin + performance.now(),
+        }),
+      ),
+    );
+    const tagMetadataKeys = await scanKeys(redis, `*:${namespace}:tag:*`);
+    expect(tagMetadataKeys.length).toBeGreaterThan(0);
+    await redis.del(...tagMetadataKeys);
+
+    await expect(handler.get("welcome-cache-key", [])).resolves.toBeUndefined();
+    await expect(handler.get("ordinary-missing-key", [])).resolves.toBeUndefined();
+    expect(diagnostics).toEqual([
+      {
+        event: "safety-miss",
+        operation: "read",
+        reason: "tag-metadata-absent",
+      },
+    ]);
+  }, 60_000);
+
+  it("reports incompatible partial tag metadata separately from absent metadata", async () => {
+    const namespace = `cache-handler-test:${randomUUID()}`;
+    const diagnostics: RedisCacheDiagnostic[] = [];
+    const handler = createRedisCacheHandler(redis, {
+      namespace,
+      onDiagnostic(diagnostic) {
+        diagnostics.push(diagnostic);
+      },
+    });
+    await handler.set(
+      "welcome-cache-key",
+      Promise.resolve(
+        cacheEntry({
+          revision: "welcome-revision-1",
+          tags: ["document:reference:en:welcome"],
+          timestamp: performance.timeOrigin + performance.now(),
+        }),
+      ),
+    );
+    const tagMetadataKeys = await scanKeys(redis, `*:${namespace}:tag:updated`);
+    expect(tagMetadataKeys).toHaveLength(1);
+    await redis.del(...tagMetadataKeys);
+
+    await expect(handler.get("welcome-cache-key", [])).resolves.toBeUndefined();
+    expect(diagnostics).toEqual([
+      {
+        event: "safety-miss",
+        operation: "read",
+        reason: "tag-metadata-incompatible",
+      },
+    ]);
+  }, 60_000);
+
+  it("rejects an obsolete completion when tag metadata disappears after invalidation", async () => {
+    const namespace = `cache-handler-test:${randomUUID()}`;
+    const diagnostics: RedisCacheDiagnostic[] = [];
+    const writer = createRedisCacheHandler(redis, {
+      namespace,
+      onDiagnostic(diagnostic) {
+        diagnostics.push(diagnostic);
+      },
+    });
+    const invalidatorRedis = redis.duplicate();
+    const invalidator = createRedisCacheHandler(invalidatorRedis, { namespace });
+    const tag = "document:reference:en:welcome";
+    const startedAt = performance.timeOrigin + performance.now();
+    const obsoleteEntry = deferred<CacheEntry>();
+
+    try {
+      await writer.set(
+        "welcome-cache-key",
+        Promise.resolve(
+          cacheEntry({ revision: "welcome-revision-1", tags: [tag], timestamp: startedAt - 1 }),
+        ),
+      );
+      const obsoleteWrite = writer.set("welcome-cache-key", obsoleteEntry.promise);
+      await invalidator.updateTags([tag], { expire: 0 });
+      const tagMetadataKeys = await scanKeys(redis, `*:${namespace}:tag:*`);
+      await redis.del(...tagMetadataKeys);
+      await expect(writer.getExpiration([tag])).resolves.toBe(Number.POSITIVE_INFINITY);
+      obsoleteEntry.resolve(
+        cacheEntry({ revision: "obsolete-revision", tags: [tag], timestamp: startedAt }),
+      );
+      await obsoleteWrite;
+
+      await expect(writer.get("welcome-cache-key", [])).resolves.toBeUndefined();
+      expect(diagnostics).toContainEqual({
+        event: "safety-miss",
+        operation: "write",
+        reason: "tag-metadata-absent",
+      });
+    } finally {
+      await invalidatorRedis.quit();
+    }
+  }, 60_000);
+
+  it("cleans tag metadata only after associated entries can no longer survive", async () => {
+    const namespace = `cache-handler-test:${randomUUID()}`;
+    const handler = createRedisCacheHandler(redis, { namespace });
+    const timestamp = performance.timeOrigin + performance.now();
+    await handler.set(
+      "welcome-cache-key",
+      Promise.resolve({
+        ...cacheEntry({
+          revision: "welcome-revision-1",
+          tags: ["document:reference:en:welcome"],
+          timestamp,
+        }),
+        expire: 0.05,
+      }),
+    );
+
+    await handler.refreshTags();
+    expect((await scanKeys(redis, `*:${namespace}:tag:*`)).length).toBe(4);
+    await expect(
+      new Response((await handler.get("welcome-cache-key", []))?.value).text(),
+    ).resolves.toBe("welcome-revision-1");
+
+    await expect(
+      pollUntil(
+        async () => {
+          await handler.refreshTags();
+          return scanKeys(redis, `*:${namespace}:tag:*`);
+        },
+        (keys) => keys.length === 0,
+        1_500,
+      ),
+    ).resolves.toEqual([]);
+    await expect(handler.get("welcome-cache-key", [])).resolves.toBeUndefined();
   }, 60_000);
 
   it("accepts a fresh completion before a deferred expiration deadline", async () => {

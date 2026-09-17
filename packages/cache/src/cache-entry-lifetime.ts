@@ -3,6 +3,7 @@ import { secondsToMilliseconds } from "date-fns/secondsToMilliseconds";
 import type { CacheEntryMetadata } from "./cache-entry-codec.ts";
 
 export type CacheEntryFreshness = "expired" | "fresh" | "stale";
+export type CacheTagFreshness = CacheEntryFreshness | "safety-miss";
 
 export type CacheTagTimestamps = Readonly<{
   expiredAt: number | null;
@@ -21,16 +22,26 @@ export function getCacheEntryFreshness(
 export function getCacheTagFreshness(
   entryTimestamp: number,
   now: number,
-  tagTimestamps: CacheTagTimestamps[],
-): CacheEntryFreshness {
+  tagTimestamps: Array<CacheTagTimestamps | null>,
+): CacheTagFreshness {
+  if (tagTimestamps.some((timestamps) => timestamps === null)) return "safety-miss";
   if (
     tagTimestamps.some(
-      ({ expiredAt }) => expiredAt !== null && expiredAt <= now && expiredAt > entryTimestamp,
+      (timestamps) =>
+        timestamps !== null &&
+        timestamps.expiredAt !== null &&
+        timestamps.expiredAt <= now &&
+        timestamps.expiredAt > entryTimestamp,
     )
   ) {
     return "expired";
   }
-  if (tagTimestamps.some(({ staleAt }) => staleAt !== null && staleAt > entryTimestamp)) {
+  if (
+    tagTimestamps.some(
+      (timestamps) =>
+        timestamps !== null && timestamps.staleAt !== null && timestamps.staleAt > entryTimestamp,
+    )
+  ) {
     return "stale";
   }
   return "fresh";

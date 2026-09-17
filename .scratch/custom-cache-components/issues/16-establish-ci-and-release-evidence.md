@@ -2,7 +2,7 @@
 
 **What to build:** Turn the compatibility scenarios into repeatable release evidence so a package version or Next.js upgrade cannot be declared supported without passing the relevant correctness contract.
 
-**Blocked by:** 06: Prevent stale writes across invalidation races; 08: Honor freshness, stale-while-revalidate, and hard expiration; 09: Support implicit route tags and path invalidation; 11: Isolate environments, releases, sites, and locales; 12: Degrade safely during Redis and source failures; 13: Recover safely from Redis restart or restored state; 14: Verify standalone builds and build/runtime revisions; 15: Preserve instant navigation and session isolation.
+**Blocked by:** 06: Prevent stale writes across invalidation races; 08: Honor freshness, stale-while-revalidate, and hard expiration; 09: Support implicit route tags and path invalidation; 11: Isolate environments, releases, sites, and locales; 12: Degrade safely during Redis and source failures; 13: Recover safely from Redis restart or restored state; 14: Verify standalone builds and build/runtime revisions; 15: Preserve instant navigation and session isolation; 26: Preserve hard invalidation across later SWR updates; 27: Bound stream cancellation and release local resources; 28: Account for owned memory behind stream chunks; 29: Replace corrupt cache entries after safe miss.
 
 **Status:** ready-for-agent
 

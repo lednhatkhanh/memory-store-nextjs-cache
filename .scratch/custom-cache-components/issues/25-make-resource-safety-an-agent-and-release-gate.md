@@ -2,7 +2,7 @@
 
 **What to build:** Make the cache package's resource contract part of normal agent behavior and release evidence so changes affecting memory ownership, concurrency, or hot paths cannot bypass the relevant automated checks or silently weaken their budgets.
 
-**Blocked by:** 16: Establish CI and release evidence; 22: Detect retained heap and resource leaks after cache churn; 23: Enforce peak RAM limits under bounded concurrency; 24: Guard CPU and event-loop performance.
+**Blocked by:** 16: Establish CI and release evidence; 22: Detect retained heap and resource leaks after cache churn; 23: Enforce peak RAM limits under bounded concurrency; 24: Guard CPU and event-loop performance; 27: Bound stream cancellation and release local resources; 28: Account for owned memory behind stream chunks.
 
 **Status:** ready-for-agent
 

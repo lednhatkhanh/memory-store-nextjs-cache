@@ -61,6 +61,32 @@ const TAG_METADATA_ABSENT_RESULT = -3;
 const TAG_METADATA_INCOMPATIBLE_RESULT = -2;
 const TAG_METADATA_READY_RESULT = 1;
 
+type MetadataControlGuardOptions = {
+  expectedGenerationArgumentIndex: number;
+  keyOffset: number;
+  missingResult?: number | "false";
+  mismatchResult?: number | "false";
+};
+
+function metadataControlGuardScript({
+  expectedGenerationArgumentIndex,
+  keyOffset,
+  missingResult = TAG_METADATA_ABSENT_RESULT,
+  mismatchResult = TAG_METADATA_INCOMPATIBLE_RESULT,
+}: MetadataControlGuardOptions): string {
+  return `
+local expectedGeneration = ARGV[${expectedGenerationArgumentIndex}]
+local actualGeneration = redis.call("GET", KEYS[${keyOffset + 6}])
+local metadataFloorValue = redis.call("GET", KEYS[${keyOffset + 5}])
+if not actualGeneration or not metadataFloorValue then
+  return ${missingResult}
+end
+if actualGeneration ~= expectedGeneration then
+  return ${mismatchResult}
+end
+`;
+}
+
 const initializeMetadataControlScript = `
 local generation = redis.call("GET", KEYS[1])
 if not generation then
@@ -74,16 +100,8 @@ return generation
 const publishEntryScript = `
 local candidateTimestamp = tonumber(ARGV[2])
 local publishTimestamp = tonumber(ARGV[3])
-local expectedGeneration = ARGV[5]
 local tagCount = tonumber(ARGV[6])
-local actualGeneration = redis.call("GET", KEYS[8])
-local metadataFloorValue = redis.call("GET", KEYS[7])
-if not actualGeneration or not metadataFloorValue then
-  return -3
-end
-if actualGeneration ~= expectedGeneration then
-  return -2
-end
+${metadataControlGuardScript({ expectedGenerationArgumentIndex: 5, keyOffset: 2 })}
 local metadataFloor = tonumber(metadataFloorValue)
 local tags = {}
 local seenTags = {}
@@ -147,15 +165,7 @@ return 1
 `;
 
 const updateTagsScript = `
-local expectedGeneration = ARGV[1]
-local actualGeneration = redis.call("GET", KEYS[6])
-local metadataFloorValue = redis.call("GET", KEYS[5])
-if not actualGeneration or not metadataFloorValue then
-  return -3
-end
-if actualGeneration ~= expectedGeneration then
-  return -2
-end
+${metadataControlGuardScript({ expectedGenerationArgumentIndex: 1, keyOffset: 0 })}
 local updatedAt = tonumber(ARGV[2])
 local expiresAt = ARGV[3] == "" and nil or tonumber(ARGV[3])
 local hasDurations = ARGV[4] == "1"
@@ -190,15 +200,7 @@ return tagCount
 `;
 
 const cleanupTagMetadataScript = `
-local expectedGeneration = ARGV[1]
-local actualGeneration = redis.call("GET", KEYS[6])
-local metadataFloorValue = redis.call("GET", KEYS[5])
-if not actualGeneration or not metadataFloorValue then
-  return -3
-end
-if actualGeneration ~= expectedGeneration then
-  return -2
-end
+${metadataControlGuardScript({ expectedGenerationArgumentIndex: 1, keyOffset: 0 })}
 local redisTime = redis.call("TIME")
 local cleanupAt = (tonumber(redisTime[1]) * 1000)
   + math.floor(tonumber(redisTime[2]) / 1000)
@@ -221,15 +223,12 @@ return #tags
 `;
 
 const readTagMetadataScript = `
-local expectedGeneration = ARGV[1]
-local actualGeneration = redis.call("GET", KEYS[6])
-local metadataFloorValue = redis.call("GET", KEYS[5])
-if not actualGeneration or not metadataFloorValue then
-  return false
-end
-if actualGeneration ~= expectedGeneration then
-  return false
-end
+${metadataControlGuardScript({
+  expectedGenerationArgumentIndex: 1,
+  keyOffset: 0,
+  missingResult: "false",
+  mismatchResult: "false",
+})}
 local tagCount = tonumber(ARGV[2])
 local result = { metadataFloorValue }
 for index = 1, tagCount do
@@ -243,15 +242,7 @@ return result
 `;
 
 const ensureTagMetadataScript = `
-local expectedGeneration = ARGV[1]
-local actualGeneration = redis.call("GET", KEYS[6])
-local metadataFloorValue = redis.call("GET", KEYS[5])
-if not actualGeneration or not metadataFloorValue then
-  return -3
-end
-if actualGeneration ~= expectedGeneration then
-  return -2
-end
+${metadataControlGuardScript({ expectedGenerationArgumentIndex: 1, keyOffset: 0 })}
 local fenceTimestamp = tonumber(ARGV[2])
 local retainedUntil = tonumber(ARGV[3])
 local tagCount = tonumber(ARGV[4])

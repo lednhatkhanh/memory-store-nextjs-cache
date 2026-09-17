@@ -1,7 +1,7 @@
 import { Redis } from "ioredis";
 
 import { createCacheNamespace } from "./cache-namespace.ts";
-import { createRedisCacheHandler } from "./index.ts";
+import { createRedisCacheHandler, type RedisCacheDiagnostic } from "./index.ts";
 
 const instance = process.env["CACHE_INSTANCE_ID"] ?? `pid:${process.pid}`;
 const REDIS_READY_TIMEOUT_MILLISECONDS = 2_000;
@@ -32,6 +32,15 @@ function optionalByteLimit(name: string): number | null {
 
 const maxBufferedBytes = optionalByteLimit("REDIS_CACHE_MAX_BUFFERED_BYTES");
 const maxEntrySizeBytes = optionalByteLimit("REDIS_CACHE_MAX_ENTRY_SIZE_BYTES");
+const reportDiagnostic = (diagnostic: RedisCacheDiagnostic): void => {
+  if (diagnostic.event === "cache-read") {
+    // oxlint-disable-next-line no-console -- This runtime seam intentionally emits bounded diagnostics.
+    console.info(JSON.stringify({ cache: "remote", instance, ...diagnostic }));
+  } else {
+    // oxlint-disable-next-line no-console -- This runtime seam intentionally emits bounded diagnostics.
+    console.warn(JSON.stringify({ cache: "remote", instance, ...diagnostic }));
+  }
+};
 const redisHandler = createRedisCacheHandler(client, {
   ...(maxBufferedBytes === null ? {} : { maxBufferedBytes }),
   ...(maxEntrySizeBytes === null ? {} : { maxEntrySizeBytes }),
@@ -42,15 +51,7 @@ const redisHandler = createRedisCacheHandler(client, {
     release: process.env["REDIS_CACHE_RELEASE"] ?? "local",
     site: process.env["REDIS_CACHE_SITE"] ?? "reference",
   }),
-  onDiagnostic(diagnostic) {
-    if (diagnostic.event === "cache-read") {
-      // oxlint-disable-next-line no-console -- This runtime seam intentionally emits bounded diagnostics.
-      console.info(JSON.stringify({ cache: "remote", instance, ...diagnostic }));
-    } else {
-      // oxlint-disable-next-line no-console -- This runtime seam intentionally emits bounded diagnostics.
-      console.warn(JSON.stringify({ cache: "remote", instance, ...diagnostic }));
-    }
-  },
+  onDiagnostic: reportDiagnostic,
 });
 
 async function waitForRedisReady(): Promise<void> {
@@ -82,6 +83,8 @@ async function waitForRedisReady(): Promise<void> {
 
     client.once("end", onEnd);
     client.once("ready", onReady);
+    if (client.status === "ready") onReady();
+    else if (client.status === "end") onEnd();
   });
 }
 
@@ -89,7 +92,12 @@ export async function propagateRedisCacheInvalidation(
   tags: string[],
   durations?: { expire?: number },
 ): Promise<void> {
-  await waitForRedisReady();
+  try {
+    await waitForRedisReady();
+  } catch (error) {
+    reportDiagnostic({ event: "invalidation-failure" });
+    throw error;
+  }
   await redisHandler.updateTags(tags, durations);
 }
 

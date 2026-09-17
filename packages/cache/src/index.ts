@@ -82,6 +82,7 @@ export type RedisCacheHandlerOptions = {
 const DEFAULT_MAX_ENTRY_SIZE_BYTES = 8 * 1_024 * 1_024;
 const DEFAULT_MAX_BUFFERED_BYTES = 32 * 1_024 * 1_024;
 const PENDING_TAG_RETENTION_MILLISECONDS = 60_000;
+const STALE_WRITE_INVALIDATION_FENCE_RESULT = -4;
 const TAG_METADATA_ABSENT_RESULT = -3;
 const TAG_METADATA_INCOMPATIBLE_RESULT = -2;
 const TAG_METADATA_READY_RESULT = 1;
@@ -149,7 +150,7 @@ for _, tag in ipairs(tags) do
     + (retainedUntil and 1 or 0)
   if stateCount == 0 then
     if metadataFloor >= candidateTimestamp then
-      return -3
+      return ${STALE_WRITE_INVALIDATION_FENCE_RESULT}
     end
   elseif stateCount ~= 4 then
     return -2
@@ -431,7 +432,7 @@ export function createRedisCacheHandler(
     DEFAULT_MAX_BUFFERED_BYTES,
     "maxBufferedBytes",
   );
-  const pendingSets = new Map<string, { promise: Promise<void> }>();
+  const pendingWrites = new Map<string, { promise: Promise<void> }>();
   let metadataGenerationPromise: Promise<string> | null = null;
   let bufferedBytes = 0;
 
@@ -600,7 +601,7 @@ export function createRedisCacheHandler(
       };
       let entry: CacheEntry | undefined;
       try {
-        await pendingSets.get(cacheKey)?.promise;
+        await pendingWrites.get(cacheKey)?.promise;
       } catch {
         // The failed replacement was never published; fall back to the last complete value.
       }
@@ -731,7 +732,7 @@ export function createRedisCacheHandler(
       }
     },
     getResourceState(): RedisCacheResourceState {
-      return { bufferedBytes, pendingWrites: pendingSets.size };
+      return { bufferedBytes, pendingWrites: pendingWrites.size };
     },
     async refreshTags(): Promise<void> {
       try {
@@ -756,7 +757,7 @@ export function createRedisCacheHandler(
       }
     },
     async set(cacheKey, pendingEntry): Promise<void> {
-      const pendingSet = { promise: Promise.resolve() };
+      const pendingWrite = { promise: Promise.resolve() };
       const write = (async (): Promise<void> => {
         const pendingTagsKey = redisPendingTagsKey(entryKeySpace, cacheKey);
         let prospectiveTags: string[];
@@ -768,7 +769,7 @@ export function createRedisCacheHandler(
           ]);
         } catch {
           emitDiagnostic({ event: "cache-write-failure" });
-          if (pendingSets.get(cacheKey) === pendingSet) pendingSets.delete(cacheKey);
+          if (pendingWrites.get(cacheKey) === pendingWrite) pendingWrites.delete(cacheKey);
           await Promise.race([
             pendingEntry.then(async (entry) => {
               await Promise.allSettled([entry.value.cancel()]);
@@ -805,7 +806,9 @@ export function createRedisCacheHandler(
             emitDiagnostic({ event: "cache-write-failure" });
             return;
           }
-          if (
+          if (publication === STALE_WRITE_INVALIDATION_FENCE_RESULT) {
+            emitDiagnostic({ event: "stale-write-rejected", reason: "invalidation-fence" });
+          } else if (
             publication === TAG_METADATA_INCOMPATIBLE_RESULT ||
             publication === TAG_METADATA_ABSENT_RESULT
           ) {
@@ -827,13 +830,13 @@ export function createRedisCacheHandler(
           serialized.release();
         }
       })();
-      pendingSet.promise = write;
-      pendingSets.set(cacheKey, pendingSet);
+      pendingWrite.promise = write;
+      pendingWrites.set(cacheKey, pendingWrite);
       try {
         await write;
       } finally {
-        if (pendingSets.get(cacheKey) === pendingSet) {
-          pendingSets.delete(cacheKey);
+        if (pendingWrites.get(cacheKey) === pendingWrite) {
+          pendingWrites.delete(cacheKey);
         }
       }
     },

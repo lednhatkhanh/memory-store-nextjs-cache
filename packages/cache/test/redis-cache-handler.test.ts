@@ -715,9 +715,8 @@ describe("Redis Cache Components handler", () => {
 
       await expect(writer.get("welcome-cache-key", [])).resolves.toBeUndefined();
       expect(diagnostics).toContainEqual({
-        event: "safety-miss",
-        operation: "write",
-        reason: "tag-metadata-absent",
+        event: "stale-write-rejected",
+        reason: "invalidation-fence",
       });
     } finally {
       await invalidatorRedis.quit();

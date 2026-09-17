@@ -27,15 +27,17 @@
   only after the maximum associated lifetime and first advances the floor, bounding expired state
   without reviving older entries.
 - 2026-09-17: Seeded lifetime-model tests cover reads, writes, invalidations, metadata loss, and
-  completion order. Real Redis tests remove complete and partial metadata, reproduce disappearance
-  between read and write, verify `getExpiration()` fails safe for implicit tags, and prove cleanup
-  preserves state required by surviving explicit and implicit-tag entries.
+  completion order plus entry expiration and metadata cleanup. Real Redis tests remove complete and
+  partial metadata, reproduce disappearance between read and write, verify `getExpiration()` fails
+  safe for implicit tags, and prove cleanup preserves state required by surviving explicit and
+  implicit-tag entries. Namespace and per-entry generation markers also reject old entries and
+  pending writes after total metadata-control loss.
 - 2026-09-17: Ordinary request misses retain the existing `result: "miss"` log. Safety misses add a
   bounded warning identifying read versus write and absent versus incompatible metadata without
   content, namespaces, tags, or cache keys.
 - 2026-09-17: Next.js 16.3.5 runtime verification used `/_next/mcp` and `agent-browser` 0.37.1.
   The public welcome route rendered the expected revision from a remote-cache hit, MCP reported no
   compilation or runtime errors, the browser console had no errors, and React retained the two
-  documented dynamic Suspense holes. The root `pnpm verify` gate passed with 49 cache-package tests,
+  documented dynamic Suspense holes. The root `pnpm verify` gate passed with 50 cache-package tests,
   six web tests including the two-instance Redis scenarios, all type/lint/format checks, and all
   production builds.

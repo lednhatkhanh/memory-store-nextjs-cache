@@ -83,15 +83,21 @@ describe("Cache Components entry freshness", () => {
     };
     let clock = 1;
     let entryTimestamp: number | null = 1;
+    let entryExpiresAt: number | null = 9;
     let tagMetadataState: { expiredAt: number | null; staleAt: number | null } | null = {
       expiredAt: 0,
       staleAt: 0,
     };
     let metadataFloor = 0;
+    let metadataRetainedUntil = 9;
     let pendingTimestamp: number | null = null;
     const trace: string[] = [];
 
     const read = (): void => {
+      if (entryExpiresAt !== null && clock > entryExpiresAt) {
+        entryTimestamp = null;
+        entryExpiresAt = null;
+      }
       if (entryTimestamp === null) return;
       const freshness = getCacheTagFreshness(entryTimestamp, clock, [tagMetadataState]);
       const expected =
@@ -118,21 +124,46 @@ describe("Cache Components entry freshness", () => {
       } else if (choice === 2) {
         tagMetadataState = { expiredAt: clock, staleAt: clock };
         metadataFloor = clock;
+        metadataRetainedUntil = Math.max(metadataRetainedUntil, entryExpiresAt ?? clock);
         trace.push(`invalidate at ${clock}`);
       } else if (choice === 3) {
         tagMetadataState = null;
         trace.push(`metadata disappears at ${clock}`);
-      } else if (pendingTimestamp !== null) {
+      } else if (choice === 4 && pendingTimestamp !== null) {
         if (pendingTimestamp > metadataFloor) {
           entryTimestamp = pendingTimestamp;
+          entryExpiresAt = pendingTimestamp + 8;
+          metadataRetainedUntil = Math.max(metadataRetainedUntil, entryExpiresAt);
           tagMetadataState ??= { expiredAt: 0, staleAt: 0 };
         }
         trace.push(`complete write from ${pendingTimestamp} at ${clock}`);
         pendingTimestamp = null;
+      } else if (choice === 5) {
+        const cleanupWouldDeleteSurvivingEntry =
+          tagMetadataState !== null &&
+          metadataRetainedUntil <= clock &&
+          entryExpiresAt !== null &&
+          entryExpiresAt > clock;
+        if (cleanupWouldDeleteSurvivingEntry) {
+          throw new Error("Cleanup became eligible before the modeled entry expired");
+        }
+        if (tagMetadataState !== null && metadataRetainedUntil <= clock) {
+          tagMetadataState = null;
+          metadataFloor = clock;
+          trace.push(`cleanup at ${clock}`);
+        }
+      } else if (choice === 6) {
+        clock = Math.max(clock, entryExpiresAt ?? clock) + 1;
+        trace.push(`entry lifetime elapses at ${clock}`);
       }
     };
 
     try {
+      runOperation(0);
+      runOperation(6);
+      runOperation(5);
+      runOperation(1);
+      runOperation(4);
       runOperation(0);
       runOperation(1);
       runOperation(2);
@@ -140,7 +171,7 @@ describe("Cache Components entry freshness", () => {
       runOperation(4);
       runOperation(0);
       for (let index = 0; index < 100; index += 1) {
-        runOperation(Math.floor(random() * 5));
+        runOperation(Math.floor(random() * 7));
       }
     } catch (error) {
       throw new Error(`Tag lifetime model failed (seed=${seed}):\n${trace.join("\n")}`, {

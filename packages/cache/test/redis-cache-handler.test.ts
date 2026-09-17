@@ -678,6 +678,63 @@ describe("Redis Cache Components handler", () => {
     }
   }, 60_000);
 
+  it("rejects an old generation after all metadata control state disappears", async () => {
+    const namespace = `cache-handler-test:${randomUUID()}`;
+    const diagnostics: RedisCacheDiagnostic[] = [];
+    const writer = createRedisCacheHandler(redis, {
+      namespace,
+      onDiagnostic(diagnostic) {
+        diagnostics.push(diagnostic);
+      },
+    });
+    const invalidatorRedis = redis.duplicate();
+    const invalidator = createRedisCacheHandler(invalidatorRedis, { namespace });
+    const tag = "document:reference:en:welcome";
+    const startedAt = performance.timeOrigin + performance.now();
+    const obsoleteEntry = deferred<CacheEntry>();
+
+    try {
+      await writer.set(
+        "welcome-cache-key",
+        Promise.resolve(
+          cacheEntry({ revision: "welcome-revision-1", tags: [tag], timestamp: startedAt - 1 }),
+        ),
+      );
+      const obsoleteWrite = writer.set("welcome-cache-key", obsoleteEntry.promise);
+      await invalidator.updateTags([tag], { expire: 0 });
+      const metadataKeys = await scanKeys(redis, `*:${namespace}:tag:*`);
+      const controlKeys = await scanKeys(redis, `*:${namespace}:metadata-*`);
+      await redis.del(...metadataKeys, ...controlKeys);
+
+      const recoveredDiagnostics: RedisCacheDiagnostic[] = [];
+      const recovered = createRedisCacheHandler(redis, {
+        namespace,
+        onDiagnostic(diagnostic) {
+          recoveredDiagnostics.push(diagnostic);
+        },
+      });
+      await recovered.getExpiration([]);
+      obsoleteEntry.resolve(
+        cacheEntry({ revision: "obsolete-revision", tags: [tag], timestamp: startedAt }),
+      );
+      await obsoleteWrite;
+
+      await expect(recovered.get("welcome-cache-key", [])).resolves.toBeUndefined();
+      expect(diagnostics).toContainEqual({
+        event: "safety-miss",
+        operation: "write",
+        reason: "tag-metadata-incompatible",
+      });
+      expect(recoveredDiagnostics).toContainEqual({
+        event: "safety-miss",
+        operation: "read",
+        reason: "tag-metadata-incompatible",
+      });
+    } finally {
+      await invalidatorRedis.quit();
+    }
+  }, 60_000);
+
   it("cleans tag metadata only after associated entries can no longer survive", async () => {
     const namespace = `cache-handler-test:${randomUUID()}`;
     const handler = createRedisCacheHandler(redis, { namespace });

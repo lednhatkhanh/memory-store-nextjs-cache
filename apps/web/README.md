@@ -98,8 +98,8 @@ namespace safety floor. That floor is also advanced by every invalidation and is
 metadata cleanup. Consequently, metadata storage is bounded by tags needed by surviving entries,
 future delayed-expiration policies, at most 60 seconds of prospective soft-tag observations, and
 work accumulated since the last request-time cleanup; it does not grow forever with expired
-entries. This bound assumes the documented `refreshTags()` hook continues to run and the small
-safety-floor key is persisted with the cache namespace.
+entries. This bound assumes the documented `refreshTags()` hook continues to run. The compact
+safety-floor and metadata-generation keys are not part of routine cleanup.
 
 A complete missing tag record on a surviving entry is a safety miss, while a partially present
 record is an incompatible-metadata safety miss. Neither is interpreted as a never-invalidated tag.
@@ -115,12 +115,19 @@ verified Redis primary topology. Publication derives the retention deadline from
 the entry's post-write `PTTL`, and cleanup uses Redis `TIME` too, so metadata cannot become eligible
 before the associated Redis entry expires.
 
+Every entry has a colocated generation marker with the same Redis lifetime, and every handler
+captures the namespace metadata generation before reading or publishing. If the floor, generation,
+and tag records are all lost, the next handler establishes a new generation. Entries from the old
+generation become incompatible safety misses, and already-running publications carrying the old
+generation are rejected. A missing entry marker also fails closed. This makes total control-state
+loss distinguishable from first use without retaining per-tag tombstones forever.
+
 Ordinary misses retain the existing `result: "miss"` request diagnostic. Safety misses additionally
 emit a bounded `event: "safety-miss"` warning with `operation: "read" | "write"` and either
 `tag-metadata-absent` or `tag-metadata-incompatible`; it contains no namespace, tag, cache key, or
-content. Redis eviction must not selectively evict metadata or the safety-floor key while retaining
-entries. If storage nevertheless loses tag records, the rules above fail closed; recovery from a
-restored or partially lost Redis dataset remains a separate operational scenario.
+content. Selective or total metadata eviction while entries survive therefore fails closed instead
+of reviving content. Reconstructing useful cache state after a restored or partially lost Redis
+dataset remains a separate operational scenario.
 
 Set these environment variables when running the reference application:
 

@@ -166,14 +166,49 @@ async function waitForDiagnostic(
 async function getRenderedContent(
   instance: ApplicationInstance,
   instances: ApplicationInstance[],
-  slug = "welcome",
+  pathname = "/cache-demo/welcome",
 ): Promise<string> {
   try {
-    return await ky.get(`${instance.url}/cache-demo/${slug}`, { retry: 0 }).text();
+    return await ky.get(`${instance.url}${pathname}`, { retry: 0 }).text();
   } catch (error) {
     throw new Error(`Request to ${instance.id} failed:${formatApplicationLogs(instances)}`, {
       cause: error,
     });
+  }
+}
+
+async function submitPathRevalidation(
+  instance: ApplicationInstance,
+  instances: ApplicationInstance[],
+  slug: string,
+): Promise<string> {
+  const pathname = `/path-cache-demo/${slug}`;
+  const rendered = await getRenderedContent(instance, instances, pathname);
+  const actionField = rendered.match(/name="(\$ACTION_ID_[^"]+)"/u)?.[1];
+  if (!actionField) {
+    throw new Error(
+      `Could not find the path revalidation Server Action:${formatApplicationLogs(instances)}`,
+    );
+  }
+  const formData = new FormData();
+  formData.set(actionField, "");
+  formData.set("slug", slug);
+
+  try {
+    return await ky
+      .post(`${instance.url}${pathname}`, {
+        body: formData,
+        headers: { origin: instance.url },
+        retry: 0,
+      })
+      .text();
+  } catch (error) {
+    throw new Error(
+      `Path revalidation on ${instance.id} failed:${formatApplicationLogs(instances)}`,
+      {
+        cause: error,
+      },
+    );
   }
 }
 
@@ -201,13 +236,39 @@ function expectRenderedRevision(
   revision: string,
   instances: ApplicationInstance[],
 ): void {
-  try {
+  expectRenderedContent(instances, `Rendered revision was not ${revision}`, () => {
     expect(rendered).toContain(revision);
+  });
+}
+
+function expectRenderedContent(
+  instances: ApplicationInstance[],
+  failure: string,
+  assertion: () => void,
+): void {
+  try {
+    assertion();
   } catch (error) {
-    throw new Error(`Rendered revision was not ${revision}:${formatApplicationLogs(instances)}`, {
-      cause: error,
-    });
+    throw new Error(`${failure}:${formatApplicationLogs(instances)}`, { cause: error });
   }
+}
+
+function expectRenderedRouteDependencies(
+  rendered: string,
+  revision: string,
+  title: string,
+  instances: ApplicationInstance[],
+): void {
+  expectRenderedContent(
+    instances,
+    `Rendered route dependencies did not contain ${revision}`,
+    () => {
+      expect(rendered).toContain(`data-layout-revision="${revision}"`);
+      expect(rendered).toContain(`data-page-revision="${revision}"`);
+      expect(rendered).toContain(`<h2 class="text-2xl font-black tracking-tight">${title}</h2>`);
+      expect(rendered).toContain(`<title>${title}</title>`);
+    },
+  );
 }
 
 async function expectSourceReads(
@@ -247,7 +308,7 @@ async function pollForRenderedRevision(
   let rendered = "";
   await vi.waitFor(
     async () => {
-      rendered = await getRenderedContent(instance, instances, slug);
+      rendered = await getRenderedContent(instance, instances, `/cache-demo/${slug}`);
       expectRenderedRevision(rendered, revision, instances);
     },
     { interval: 50, timeout: 5_000 },
@@ -321,6 +382,22 @@ describe("two production Next.js instances with shared Redis cache reuse", () =>
             site: "reference",
             slug: "beta",
             title: "Published beta",
+          },
+          {
+            body: "Target page before path revalidation",
+            locale: "en",
+            revision: "path-target-page-1",
+            site: "reference",
+            slug: "path-target",
+            title: "Target page revision 1",
+          },
+          {
+            body: "Bystander page remains reusable",
+            locale: "en",
+            revision: "path-bystander-page-1",
+            site: "reference",
+            slug: "path-bystander",
+            title: "Bystander page revision 1",
           },
         ],
       },
@@ -401,13 +478,13 @@ describe("two production Next.js instances with shared Redis cache reuse", () =>
       );
 
       expectRenderedRevision(
-        await getRenderedContent(applicationA, applicationRuns, "alpha"),
+        await getRenderedContent(applicationA, applicationRuns, "/cache-demo/alpha"),
         "alpha-revision-1",
         applicationRuns,
       );
       await expectSourceReads(contentServiceUrl, applicationRuns, 1, "alpha");
       expectRenderedRevision(
-        await getRenderedContent(applicationB, applicationRuns, "alpha"),
+        await getRenderedContent(applicationB, applicationRuns, "/cache-demo/alpha"),
         "alpha-revision-1",
         applicationRuns,
       );
@@ -469,19 +546,19 @@ describe("two production Next.js instances with shared Redis cache reuse", () =>
       await expectSourceReads(contentServiceUrl, applicationRuns, 3);
 
       expectRenderedRevision(
-        await getRenderedContent(applicationB, applicationRuns, "alpha"),
+        await getRenderedContent(applicationB, applicationRuns, "/cache-demo/alpha"),
         "alpha-revision-1",
         applicationRuns,
       );
       await expectSourceReads(contentServiceUrl, applicationRuns, 1, "alpha");
 
       expectRenderedRevision(
-        await getRenderedContent(applicationA, applicationRuns, "beta"),
+        await getRenderedContent(applicationA, applicationRuns, "/cache-demo/beta"),
         "beta-revision-1",
         applicationRuns,
       );
       expectRenderedRevision(
-        await getRenderedContent(applicationB, applicationRuns, "beta"),
+        await getRenderedContent(applicationB, applicationRuns, "/cache-demo/beta"),
         "beta-revision-1",
         applicationRuns,
       );
@@ -505,7 +582,7 @@ describe("two production Next.js instances with shared Redis cache reuse", () =>
       trace.push("11. beta-revision-1 became stale under the brief SWR policy");
 
       expectRenderedRevision(
-        await getRenderedContent(applicationB, applicationRuns, "beta"),
+        await getRenderedContent(applicationB, applicationRuns, "/cache-demo/beta"),
         "beta-revision-1",
         applicationRuns,
       );
@@ -523,5 +600,97 @@ describe("two production Next.js instances with shared Redis cache reuse", () =>
         { cause: error },
       );
     }
+  }, 60_000);
+
+  it("revalidates every cached dependency for one path without invalidating another route", async () => {
+    if (!applicationA || !applicationB) throw new Error("Applications did not start");
+
+    const targetBefore = await getRenderedContent(
+      applicationA,
+      applicationRuns,
+      "/path-cache-demo/path-target",
+    );
+    expectRenderedRouteDependencies(
+      targetBefore,
+      "path-target-page-1",
+      "Target page revision 1",
+      applicationRuns,
+    );
+    await expectSourceReads(contentServiceUrl, applicationRuns, 3, "path-target");
+
+    const bystanderBefore = await getRenderedContent(
+      applicationB,
+      applicationRuns,
+      "/path-cache-demo/path-bystander",
+    );
+    expectRenderedRouteDependencies(
+      bystanderBefore,
+      "path-bystander-page-1",
+      "Bystander page revision 1",
+      applicationRuns,
+    );
+    await expectSourceReads(contentServiceUrl, applicationRuns, 3, "path-bystander");
+
+    for (const [slug, revision, title] of [
+      ["path-target", "path-target-page-2", "Target page revision 2"],
+      ["path-bystander", "path-bystander-page-2", "Bystander page revision 2"],
+    ] as const) {
+      await ky.put(`${contentServiceUrl}/__test/documents/reference/en/${slug}`, {
+        json: { body: `Updated ${slug}`, revision, title },
+        retry: 0,
+      });
+    }
+
+    const actionResponse = await submitPathRevalidation(
+      applicationA,
+      applicationRuns,
+      "path-target",
+    );
+    expectRenderedRouteDependencies(
+      actionResponse,
+      "path-target-page-2",
+      "Target page revision 2",
+      applicationRuns,
+    );
+
+    const targetOnB = await getRenderedContent(
+      applicationB,
+      applicationRuns,
+      "/path-cache-demo/path-target",
+    );
+    expectRenderedRouteDependencies(
+      targetOnB,
+      "path-target-page-2",
+      "Target page revision 2",
+      applicationRuns,
+    );
+    await expectSourceReads(contentServiceUrl, applicationRuns, 9, "path-target");
+
+    const targetAgainOnA = await getRenderedContent(
+      applicationA,
+      applicationRuns,
+      "/path-cache-demo/path-target",
+    );
+    expectRenderedRouteDependencies(
+      targetAgainOnA,
+      "path-target-page-2",
+      "Target page revision 2",
+      applicationRuns,
+    );
+    await expectSourceReads(contentServiceUrl, applicationRuns, 9, "path-target");
+
+    const bystanderAfter = await getRenderedContent(
+      applicationA,
+      applicationRuns,
+      "/path-cache-demo/path-bystander",
+    );
+    expectRenderedRouteDependencies(
+      bystanderAfter,
+      "path-bystander-page-1",
+      "Bystander page revision 1",
+      applicationRuns,
+    );
+    expect(bystanderAfter).not.toContain("path-bystander-page-2");
+    await expectSourceReads(contentServiceUrl, applicationRuns, 3, "path-bystander");
   }, 60_000);
 });

@@ -72,7 +72,10 @@ runtime verification loop.
 The application registers the package's public `next-handler` subpath as the `remote` entry in
 Next.js's plural `cacheHandlers` configuration. Published content is read through a function marked
 with `'use cache: remote'`; request-time visitor state is not read or passed into that function.
-Its cache dimensions are limited to the validated public `site`, `locale`, and `slug` values.
+Its public-content identity is limited to the validated `site`, `locale`, and `slug` values. The
+path-revalidation example adds one closed `page` / `layout` / `metadata` cache-role discriminator
+so each framework consumer has an independently observable cache entry; the role does not change
+the source document identity or enter the content-service URL.
 
 Set these environment variables when running the reference application:
 
@@ -110,6 +113,21 @@ uses `revalidateTag(tag, { expire: 0 })`, the production-appropriate Next.js bou
 expiration from a webhook or other external system. The cache handler records tag staleness and
 expiration timestamps in namespace-scoped Redis sorted sets. Every instance consults that durable
 state when reading an entry, so correctness does not depend on Pub/Sub or process-local state.
+
+The `/path-cache-demo/[slug]` route demonstrates the complementary implicit-tag path. Its page,
+dynamic metadata, and segment layout read the same published document through distinct
+`'use cache: remote'` keys. The progressively enhanced `Revalidate this path` form invokes an
+actual Server Action, validates the submitted slug, and calls `revalidatePath()` for the literal
+route. Next.js supplies the route's implicit soft tags to the custom handler, so the action's
+immediate response renders the current page, metadata, and layout values and later requests on
+either application instance reject the older entries. A warmed sibling route retains its prior
+render and source-read count because neither its implicit route tags nor its explicit published
+document tag were invalidated.
+
+This scenario demonstrates the Cache Components entries read by the page, `generateMetadata`, and
+the `[slug]` layout plus the Server Action's immediate response behavior in Next.js 16.3.5. It does
+not claim that the Full Route Cache, request memoization, browser Router Cache, CDN cache, or other
+framework cache layers are stored in Redis or shared across instances.
 
 Content whose documented policy permits a brief old response during refresh can explicitly add
 `"policy": "stale-while-revalidate"` to the same authenticated request. That opt-in uses the

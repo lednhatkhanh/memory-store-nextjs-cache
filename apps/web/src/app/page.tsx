@@ -27,6 +27,12 @@ export default function HomePage() {
           >
             Open beta
           </Link>
+          <Link
+            className="rounded-full border border-outline px-5 py-3 font-bold text-accent transition data-focus-visible:outline-2 data-focus-visible:outline-offset-2 data-focus-visible:outline-accent data-hovered:bg-accent-soft data-pressed:brightness-95"
+            href="/path-cache-demo/welcome"
+          >
+            Explore path revalidation
+          </Link>
         </nav>
       </section>
     </main>

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { createCacheNamespace, type CacheNamespaceInput } from "../src/index.js";
+import {
+  createCacheNamespace,
+  createRedisCacheHandler,
+  type CacheNamespaceInput,
+} from "../src/index.js";
 
 const baseNamespace: CacheNamespaceInput = {
   application: "reference-app",
@@ -47,6 +51,17 @@ describe("cache namespace", () => {
 
     expect(newRelease.deployment).toBe(oldRelease.deployment);
     expect(newRelease.release).not.toBe(oldRelease.release);
+  }, 1_000);
+
+  it("rejects a digest-shaped object that was not constructed by the namespace model", () => {
+    const forged = {
+      deployment: "a".repeat(64),
+      release: "b".repeat(64),
+    };
+
+    expect(() => Reflect.apply(createRedisCacheHandler, null, [{}, { namespace: forged }])).toThrow(
+      "Redis cache namespace must be created with createCacheNamespace",
+    );
   }, 1_000);
 
   it.each([

@@ -8,7 +8,10 @@ export type CacheNamespaceInput = Readonly<{
   site: string;
 }>;
 
+const cacheNamespaceBrand: unique symbol = Symbol("cache-namespace");
+
 export type CacheNamespace = Readonly<{
+  [cacheNamespaceBrand]: true;
   deployment: string;
   release: string;
 }>;
@@ -46,8 +49,21 @@ export function createCacheNamespace(input: CacheNamespaceInput): CacheNamespace
     input.site,
     input.locale,
   ]);
-  return {
+  const namespace = {
+    [cacheNamespaceBrand]: true as const,
     deployment,
     release: digest(["cache-release", 1, deployment, input.release]),
   };
+  Object.defineProperty(namespace, cacheNamespaceBrand, { enumerable: false });
+  return Object.freeze(namespace);
+}
+
+export function isCacheNamespace(value: unknown): value is CacheNamespace {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Reflect.get(value, cacheNamespaceBrand) === true &&
+    /^[a-f\d]{64}$/u.test(String(Reflect.get(value, "deployment"))) &&
+    /^[a-f\d]{64}$/u.test(String(Reflect.get(value, "release")))
+  );
 }

@@ -6,7 +6,7 @@ import type { Redis } from "ioredis";
 
 import { decodeCacheEntry, encodeCacheEntry, type CacheEntry } from "./cache-entry-codec.ts";
 import { getCacheEntryFreshness, getCacheTagFreshness } from "./cache-entry-lifetime.ts";
-import type { CacheNamespace } from "./cache-namespace.ts";
+import { isCacheNamespace, type CacheNamespace } from "./cache-namespace.ts";
 
 export {
   createCacheNamespace,
@@ -397,10 +397,7 @@ export function createRedisCacheHandler(
   client: Redis,
   options: RedisCacheHandlerOptions,
 ): RedisCacheHandler {
-  if (
-    !/^[a-f\d]{64}$/u.test(options.namespace.deployment) ||
-    !/^[a-f\d]{64}$/u.test(options.namespace.release)
-  ) {
+  if (!isCacheNamespace(options.namespace)) {
     throw new Error("Redis cache namespace must be created with createCacheNamespace");
   }
 

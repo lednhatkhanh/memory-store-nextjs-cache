@@ -38,5 +38,9 @@
   `reference/en/welcome` document, and React diagnostics retained the expected dynamic Cache
   Components boundary.
 - 2026-09-17: A fresh temporary clone completed `corepack pnpm install --frozen-lockfile` and the
-  cache-bypassed root `pnpm verify`, covering formatting, linting, type-checking, 84 tests, package
+  cache-bypassed root `pnpm verify`, covering formatting, linting, type-checking, 86 tests, package
   builds, the production Next.js build, and all disposable Redis scenarios.
+- 2026-09-17: Two-axis review findings were resolved before completion. The package handler now
+  imports the namespace constructor from its owning module; namespace values carry a private runtime
+  brand so digest-shaped objects cannot bypass construction; and application configuration applies
+  the canonical public-content site/locale validator before exposing those dimensions to routes.

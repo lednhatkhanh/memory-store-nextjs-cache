@@ -10,6 +10,8 @@ export type PublicContentDimensions = {
   slug: string;
 };
 
+export type PublicContentPartition = Pick<PublicContentDimensions, "locale" | "site">;
+
 export type PublishedDocument = PublicContentDimensions & {
   body: string;
   revision: string;
@@ -25,12 +27,22 @@ const publicDimensionPatterns = {
 export function validatePublicContentDimensions(
   dimensions: PublicContentDimensions,
 ): PublicContentDimensions {
-  for (const dimension of ["site", "locale", "slug"] as const) {
-    if (!publicDimensionPatterns[dimension].test(dimensions[dimension])) {
+  validatePublicContentPartition(dimensions);
+  if (!publicDimensionPatterns.slug.test(dimensions.slug)) {
+    throw new Error("Invalid public content slug");
+  }
+  return dimensions;
+}
+
+export function validatePublicContentPartition(
+  partition: PublicContentPartition,
+): PublicContentPartition {
+  for (const dimension of ["site", "locale"] as const) {
+    if (!publicDimensionPatterns[dimension].test(partition[dimension])) {
       throw new Error(`Invalid public content ${dimension}`);
     }
   }
-  return dimensions;
+  return partition;
 }
 
 export async function getContentServiceHealth(

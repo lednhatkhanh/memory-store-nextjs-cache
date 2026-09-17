@@ -27,14 +27,13 @@ describe("reference application configuration", () => {
   });
 
   it.each([
-    ["REDIS_CACHE_ENVIRONMENT", "Production"],
-    ["REDIS_CACHE_LOCALE", "en-us"],
-    ["REDIS_CACHE_NAMESPACE", "reference/app"],
-    ["REDIS_CACHE_RELEASE", "release/current"],
-    ["REDIS_CACHE_SITE", "../private"],
-  ] as const)("rejects invalid %s input", (name, value) => {
-    expect(() => getReferenceApplicationConfig({ [name]: value })).toThrow(
-      "Invalid cache namespace",
-    );
+    ["REDIS_CACHE_ENVIRONMENT", "Production", "Invalid cache namespace"],
+    ["REDIS_CACHE_LOCALE", "en-us", "Invalid cache namespace"],
+    ["REDIS_CACHE_NAMESPACE", "reference/app", "Invalid cache namespace"],
+    ["REDIS_CACHE_RELEASE", "release/current", "Invalid cache namespace"],
+    ["REDIS_CACHE_SITE", "../private", "Invalid cache namespace"],
+    ["REDIS_CACHE_SITE", "marketing.site", "Invalid public content site"],
+  ] as const)("rejects invalid %s input", (name, value, message) => {
+    expect(() => getReferenceApplicationConfig({ [name]: value })).toThrow(message);
   });
 });

@@ -1,6 +1,6 @@
 import { createCacheNamespace, type CacheNamespace } from "unicorn-nextjs-memory-cache";
 
-import type { PublicContentDimensions } from "./content-client";
+import { type PublicContentDimensions, validatePublicContentPartition } from "./content-client";
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -22,7 +22,7 @@ export function getReferenceApplicationConfig(
     site,
   });
 
-  return { content: { locale, site }, namespace };
+  return { content: validatePublicContentPartition({ locale, site }), namespace };
 }
 
 export const referenceApplicationConfig = getReferenceApplicationConfig(process.env);

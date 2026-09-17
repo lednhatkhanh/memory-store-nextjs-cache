@@ -36,6 +36,6 @@
 - 2026-09-17: Next.js 16.3.5 runtime verification used `/_next/mcp` and `agent-browser` 0.37.1.
   The public welcome route rendered the expected revision from a remote-cache hit, MCP reported no
   compilation or runtime errors, the browser console had no errors, and React retained the two
-  documented dynamic Suspense holes. The root `pnpm verify` gate passed with 47 cache-package tests,
+  documented dynamic Suspense holes. The root `pnpm verify` gate passed with 49 cache-package tests,
   six web tests including the two-instance Redis scenarios, all type/lint/format checks, and all
   production builds.

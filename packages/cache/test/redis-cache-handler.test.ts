@@ -121,15 +121,12 @@ async function pollUntil<T>(
 }
 
 async function scanKeys(client: Redis, pattern: string): Promise<string[]> {
-  const keys: string[] = [];
-  let cursor = "0";
-  do {
-    // oxlint-disable-next-line no-await-in-loop -- Redis SCAN pagination is sequential.
+  const scanPage = async (cursor: string, keys: string[]): Promise<string[]> => {
     const [nextCursor, page] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100);
-    cursor = nextCursor;
-    keys.push(...page);
-  } while (cursor !== "0");
-  return keys;
+    const nextKeys = [...keys, ...page];
+    return nextCursor === "0" ? nextKeys : scanPage(nextCursor, nextKeys);
+  };
+  return scanPage("0", []);
 }
 
 describe("Redis Cache Components handler", () => {
@@ -577,6 +574,67 @@ describe("Redis Cache Components handler", () => {
     ]);
   }, 60_000);
 
+  it("does not leave partial metadata when publication encounters an incompatible tag", async () => {
+    const namespace = `cache-handler-test:${randomUUID()}`;
+    const handler = createRedisCacheHandler(redis, { namespace });
+    const incompatibleTag = "document:reference:en:incompatible";
+    const newTag = "document:reference:en:new";
+    await handler.set(
+      "seed-cache-key",
+      Promise.resolve(
+        cacheEntry({
+          revision: "seed-revision",
+          tags: [incompatibleTag],
+          timestamp: performance.timeOrigin + performance.now(),
+        }),
+      ),
+    );
+    const updatedKeys = await scanKeys(redis, `*:${namespace}:tag:updated`);
+    await redis.del(...updatedKeys);
+
+    await handler.set(
+      "rejected-cache-key",
+      Promise.resolve(
+        cacheEntry({
+          revision: "rejected-revision",
+          tags: [newTag, incompatibleTag],
+          timestamp: performance.timeOrigin + performance.now(),
+        }),
+      ),
+    );
+
+    const metadataKeys = await scanKeys(redis, `*:${namespace}:tag:*`);
+    await expect(
+      Promise.all(metadataKeys.map(async (key) => redis.zscore(key, newTag))),
+    ).resolves.toEqual(metadataKeys.map(() => null));
+  }, 60_000);
+
+  it("captures prospective soft tags before awaiting a long render", async () => {
+    const namespace = `cache-handler-test:${randomUUID()}`;
+    const handler = createRedisCacheHandler(redis, { namespace });
+    const invalidatorRedis = redis.duplicate();
+    const invalidator = createRedisCacheHandler(invalidatorRedis, { namespace });
+    const softTag = "_N_T_/cache-demo/welcome";
+    const startedAt = performance.timeOrigin + performance.now();
+    const pendingEntry = deferred<CacheEntry>();
+
+    try {
+      await expect(handler.get("welcome-cache-key", [softTag])).resolves.toBeUndefined();
+      const write = handler.set("welcome-cache-key", pendingEntry.promise);
+      const pendingTagKeys = await scanKeys(redis, `*:${namespace}:pending-tags:*`);
+      await redis.del(...pendingTagKeys);
+      await invalidator.updateTags([softTag], { expire: 0 });
+      pendingEntry.resolve(
+        cacheEntry({ revision: "obsolete-revision", tags: [], timestamp: startedAt }),
+      );
+      await write;
+
+      await expect(handler.get("welcome-cache-key", [])).resolves.toBeUndefined();
+    } finally {
+      await invalidatorRedis.quit();
+    }
+  }, 60_000);
+
   it("rejects an obsolete completion when tag metadata disappears after invalidation", async () => {
     const namespace = `cache-handler-test:${randomUUID()}`;
     const diagnostics: RedisCacheDiagnostic[] = [];
@@ -652,6 +710,7 @@ describe("Redis Cache Components handler", () => {
         1_500,
       ),
     ).resolves.toEqual([]);
+    await expect(scanKeys(redis, `*:${namespace}:entry:*`)).resolves.toEqual([]);
     await expect(handler.get("welcome-cache-key", [])).resolves.toBeUndefined();
   }, 60_000);
 

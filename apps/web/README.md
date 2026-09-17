@@ -87,10 +87,10 @@ the retained-until horizon through the Redis lifetime of the longest surviving a
 tag updates extend it through both existing entry lifetimes and any delayed-expiration deadline.
 Implicit soft tags first receive a 60-second prospective lease when `get()` observes a cache miss.
 The pending tag set shares the namespace's Redis Cluster slot and expires with the same lease. A
-successful publication atomically fences against those tags, extends their metadata through the
-entry's hard lifetime, and removes the pending set. A render that outlives the prospective lease can
-still complete for its caller, but cleanup advances the safety floor and prevents that old render
-from becoming reusable.
+handler captures those tags before awaiting the pending entry, so a render that outlives the Redis
+lease still fences against them when it completes. A successful publication extends their metadata
+through the entry's hard lifetime and removes the pending set. If cleanup removes the leased
+metadata first, its advanced safety floor prevents that old render from becoming reusable.
 
 Next.js calls `refreshTags()` before requests. The handler uses that hook to atomically remove all
 four records whose retention horizons have elapsed. The same operation first advances a compact
@@ -111,7 +111,9 @@ publication may initialize a genuinely new complete record only when its render 
 strictly newer than the safety floor; this prevents metadata loss between a read and a later write
 from admitting a pre-invalidation render. Cleanup and publication are namespace-slot-local Lua
 operations, so horizon checks, floor advancement, removal, fencing, and writes are atomic on the
-verified Redis primary topology.
+verified Redis primary topology. Publication derives the retention deadline from Redis `TIME` plus
+the entry's post-write `PTTL`, and cleanup uses Redis `TIME` too, so metadata cannot become eligible
+before the associated Redis entry expires.
 
 Ordinary misses retain the existing `result: "miss"` request diagnostic. Safety misses additionally
 emit a bounded `event: "safety-miss"` warning with `operation: "read" | "write"` and either
@@ -205,8 +207,9 @@ The entry and tag keys share a namespace-derived Redis hash tag, so the compare-
 atomic operation on Redis Cluster as well as standalone Redis. This strategy assumes participating
 Next.js hosts have synchronized epoch clocks, monotonic clocks within a process, and enough clock
 resolution to strictly order generation starts and publication invalidations. Redis provides the
-atomic ordering decision but does not supply the timestamps; clock skew that reverses those events
-would violate the fence assumption.
+atomic ordering decision and supplies cleanup/retention time. Participating Next.js hosts and the
+Redis primary must have synchronized epoch clocks; skew that reverses generation, invalidation, or
+cleanup events would violate the fence assumption.
 
 The handler consumes a candidate value to completion before publication and bounds that work to
 8 MiB of metadata plus raw payload per entry and 32 MiB of raw payload retained across concurrent

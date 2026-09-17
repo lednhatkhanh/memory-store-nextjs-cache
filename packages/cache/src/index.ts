@@ -57,6 +57,9 @@ export type RedisCacheHandlerOptions = {
 const DEFAULT_MAX_ENTRY_SIZE_BYTES = 8 * 1_024 * 1_024;
 const DEFAULT_MAX_BUFFERED_BYTES = 32 * 1_024 * 1_024;
 const PENDING_TAG_RETENTION_MILLISECONDS = 60_000;
+const TAG_METADATA_ABSENT_RESULT = -3;
+const TAG_METADATA_INCOMPATIBLE_RESULT = -2;
+const TAG_METADATA_READY_RESULT = 1;
 
 const publishEntryScript = `
 local candidateTimestamp = tonumber(ARGV[2])
@@ -72,13 +75,6 @@ for index = 1, tagCount do
     seenTags[tag] = true
   end
 end
-for _, tag in ipairs(redis.call("SMEMBERS", KEYS[7])) do
-  if not seenTags[tag] then
-    table.insert(tags, tag)
-    seenTags[tag] = true
-  end
-end
-
 for _, tag in ipairs(tags) do
   local staleAt = redis.call("ZSCORE", KEYS[2], tag)
   local expiredAt = redis.call("ZSCORE", KEYS[3], tag)
@@ -93,9 +89,6 @@ for _, tag in ipairs(tags) do
     if metadataFloor >= candidateTimestamp then
       return -3
     end
-    redis.call("ZADD", KEYS[2], 0, tag)
-    redis.call("ZADD", KEYS[3], 0, tag)
-    redis.call("ZADD", KEYS[4], 0, tag)
   elseif stateCount ~= 4 then
     return -2
   end
@@ -119,8 +112,14 @@ if current then
 end
 
 redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[4])
-local retainedUntil = publishTimestamp + (tonumber(ARGV[4]) * 1000)
+local redisTime = redis.call("TIME")
+local retainedUntil = (tonumber(redisTime[1]) * 1000)
+  + math.floor(tonumber(redisTime[2]) / 1000)
+  + redis.call("PTTL", KEYS[1])
 for _, tag in ipairs(tags) do
+  redis.call("ZADD", KEYS[2], "NX", 0, tag)
+  redis.call("ZADD", KEYS[3], "NX", 0, tag)
+  redis.call("ZADD", KEYS[4], "NX", 0, tag)
   redis.call("ZADD", KEYS[5], "GT", retainedUntil, tag)
 end
 redis.call("DEL", KEYS[7])
@@ -162,7 +161,9 @@ return tagCount
 `;
 
 const cleanupTagMetadataScript = `
-local cleanupAt = tonumber(ARGV[1])
+local redisTime = redis.call("TIME")
+local cleanupAt = (tonumber(redisTime[1]) * 1000)
+  + math.floor(tonumber(redisTime[2]) / 1000)
 local tags = redis.call("ZRANGEBYSCORE", KEYS[4], "-inf", cleanupAt)
 if #tags == 0 then
   return 0
@@ -365,11 +366,14 @@ export function createRedisCacheHandler(
       tags.length,
       ...tags,
     );
-    if (result === 1) return true;
+    if (result === TAG_METADATA_READY_RESULT) return true;
     emitDiagnostic({
       event: "safety-miss",
       operation: "read",
-      reason: result === -2 ? "tag-metadata-incompatible" : "tag-metadata-absent",
+      reason:
+        result === TAG_METADATA_INCOMPATIBLE_RESULT
+          ? "tag-metadata-incompatible"
+          : "tag-metadata-absent",
     });
     return false;
   };
@@ -568,12 +572,14 @@ export function createRedisCacheHandler(
         redisTagKey(keySpace, "updated"),
         redisTagKey(keySpace, "retained"),
         redisMetadataFloorKey(keySpace),
-        nowInEpochMilliseconds(),
       );
     },
     async set(cacheKey, pendingEntry): Promise<void> {
       const write = (async (): Promise<void> => {
+        const pendingTagsKey = redisPendingTagsKey(keySpace, cacheKey);
+        const prospectiveTags = await client.smembers(pendingTagsKey);
         const entry = await pendingEntry;
+        const publicationTags = uniq([...entry.tags, ...prospectiveTags]);
         const serialized = await serializeEntry(entry);
         try {
           const publication = await client.eval(
@@ -585,19 +591,25 @@ export function createRedisCacheHandler(
             redisTagKey(keySpace, "updated"),
             redisTagKey(keySpace, "retained"),
             redisMetadataFloorKey(keySpace),
-            redisPendingTagsKey(keySpace, cacheKey),
+            pendingTagsKey,
             serialized.stored,
             entry.timestamp,
             nowInEpochMilliseconds(),
             Math.max(1, Math.ceil(entry.expire)),
-            entry.tags.length,
-            ...entry.tags,
+            publicationTags.length,
+            ...publicationTags,
           );
-          if (publication === -2 || publication === -3) {
+          if (
+            publication === TAG_METADATA_INCOMPATIBLE_RESULT ||
+            publication === TAG_METADATA_ABSENT_RESULT
+          ) {
             emitDiagnostic({
               event: "safety-miss",
               operation: "write",
-              reason: publication === -3 ? "tag-metadata-absent" : "tag-metadata-incompatible",
+              reason:
+                publication === TAG_METADATA_ABSENT_RESULT
+                  ? "tag-metadata-absent"
+                  : "tag-metadata-incompatible",
             });
           }
         } finally {
